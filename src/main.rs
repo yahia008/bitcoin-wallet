@@ -6,10 +6,11 @@ mod send;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Network, SignedAmount};
-use bdk_wallet::chain::ChainPosition;
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Network, SignedAmount, Txid};
+use bdk_wallet::chain::{ChainPosition, ConfirmationBlockTime};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
@@ -77,6 +78,20 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Show a transaction's confirmation status
+    Status {
+        /// Transaction id
+        txid: String,
+        /// Keep polling until the transaction reaches --until confirmations
+        #[arg(long)]
+        watch: bool,
+        /// Confirmations to wait for with --watch
+        #[arg(long, default_value_t = 1)]
+        until: u32,
+        /// Seconds between polls with --watch
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -91,6 +106,9 @@ fn main() -> anyhow::Result<()> {
         Command::History => history(&cli),
         Command::Send { ref address, ref amount, fee_rate, yes } => {
             send(&cli, address, amount, fee_rate, yes)
+        }
+        Command::Status { ref txid, watch, until, interval } => {
+            status(&cli, txid, watch, until, interval)
         }
     }
 }
@@ -212,13 +230,7 @@ fn history(cli: &Cli) -> anyhow::Result<()> {
             Ok(fee) if sent.to_sat() > 0 => format!("{} sat", fee.to_sat()),
             _ => "-".to_owned(),
         };
-        let status = match tx.chain_position {
-            ChainPosition::Unconfirmed { .. } => "unconfirmed".to_owned(),
-            ChainPosition::Confirmed { anchor, .. } => {
-                let confs = tip - anchor.block_id.height + 1;
-                format!("{confs} conf (block {})", anchor.block_id.height)
-            }
-        };
+        let status = describe(tip, &tx.chain_position);
         println!(
             "{}  {:>17}  {:>12}  {status}",
             tx.tx_node.txid,
@@ -227,6 +239,53 @@ fn history(cli: &Cli) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn status(cli: &Cli, txid: &str, watch: bool, until: u32, interval: u64) -> anyhow::Result<()> {
+    let txid = Txid::from_str(txid).context("invalid txid")?;
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    let rpc = connect(cli)?;
+
+    let mut last_printed = None;
+    loop {
+        // Each sync only fetches blocks we haven't seen, so polling like this is cheap.
+        chain::sync(&mut wallet, &mut conn, &rpc)?;
+        let tip = wallet.latest_checkpoint().height();
+        // get_tx only returns txs in the wallet's current view of the chain, so a tx that was
+        // replaced or evicted from the mempool shows up as missing.
+        let Some(tx) = wallet.get_tx(txid) else {
+            bail!("{txid} not found: not a wallet transaction, or dropped from the mempool");
+        };
+
+        let line = describe(tip, &tx.chain_position);
+        if last_printed.as_ref() != Some(&line) {
+            println!("{line}");
+            last_printed = Some(line);
+        }
+        if !watch || confirmations(tip, &tx.chain_position) >= until {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(interval));
+    }
+}
+
+/// 0 while unconfirmed; 1 once in a block; +1 for every block mined on top.
+fn confirmations(tip: u32, position: &ChainPosition<ConfirmationBlockTime>) -> u32 {
+    match position {
+        ChainPosition::Unconfirmed { .. } => 0,
+        ChainPosition::Confirmed { anchor, .. } => tip - anchor.block_id.height + 1,
+    }
+}
+
+fn describe(tip: u32, position: &ChainPosition<ConfirmationBlockTime>) -> String {
+    match position {
+        ChainPosition::Unconfirmed { .. } => "unconfirmed".to_owned(),
+        ChainPosition::Confirmed { anchor, .. } => format!(
+            "{} conf (block {})",
+            confirmations(tip, position),
+            anchor.block_id.height
+        ),
+    }
 }
 
 fn send(
