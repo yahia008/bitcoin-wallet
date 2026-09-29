@@ -1,3 +1,4 @@
+mod chain;
 mod secret;
 
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::{self, Segwitv0};
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
+use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
 use clap::{Parser, Subcommand};
 
 /// Regtest only for now. Changing this also requires changing the coin type (1') below.
@@ -31,6 +32,18 @@ struct Cli {
     #[arg(long, default_value = "wallet.sqlite")]
     db: PathBuf,
 
+    /// Bitcoin Core RPC URL
+    #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:18443")]
+    rpc_url: String,
+
+    /// Bitcoin Core RPC username
+    #[arg(long, env = "RPC_USER", default_value = "wallet")]
+    rpc_user: String,
+
+    /// Bitcoin Core RPC password
+    #[arg(long, env = "RPC_PASS", default_value = "wallet", hide_default_value = true)]
+    rpc_pass: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -41,8 +54,14 @@ enum Command {
     Create,
     /// Restore a wallet from an existing mnemonic
     Restore,
-    /// Reveal the next unused receive address
+    /// Reveal a new receive address
     Address,
+    /// List revealed receive addresses and whether they have been used
+    Addresses,
+    /// Sync with Bitcoin Core
+    Sync,
+    /// Sync, then show confirmed and unconfirmed balance
+    Balance,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -51,6 +70,9 @@ fn main() -> anyhow::Result<()> {
         Command::Create => create(&cli.db),
         Command::Restore => restore(&cli.db),
         Command::Address => address(&cli.db),
+        Command::Addresses => addresses(&cli),
+        Command::Sync => sync(&cli),
+        Command::Balance => balance(&cli),
     }
 }
 
@@ -95,19 +117,69 @@ fn restore(db: &Path) -> anyhow::Result<()> {
 }
 
 fn address(db: &Path) -> anyhow::Result<()> {
-    // Loading needs no password: the database only holds public descriptors.
-    let mut conn = open_existing(db)?;
-    let mut wallet = Wallet::load()
-        .check_network(NETWORK)
-        .load_wallet(&mut conn)
-        .context("loading wallet")?
-        .ok_or_else(|| anyhow!("{} contains no wallet", db.display()))?;
-
+    let (mut conn, mut wallet) = load(db)?;
     let next = wallet.reveal_next_address(KeychainKind::External);
     wallet.persist(&mut conn).context("saving wallet")?;
 
     println!("Receive address (index {}): {}", next.index, next.address);
     Ok(())
+}
+
+fn addresses(cli: &Cli) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    // Sync first: "used" means a transaction paying to it has been seen on chain or in the mempool.
+    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+
+    let Some(last) = wallet.derivation_index(KeychainKind::External) else {
+        println!("No receive addresses revealed yet.");
+        return Ok(());
+    };
+    for index in 0..=last {
+        let info = wallet.peek_address(KeychainKind::External, index);
+        let used = wallet.spk_index().is_used(KeychainKind::External, index);
+        println!("{index:>4}  {}  {}", info.address, if used { "used" } else { "unused" });
+    }
+    Ok(())
+}
+
+fn sync(cli: &Cli) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    let summary = chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    println!(
+        "Synced: scanned {} new block(s), tip at height {}",
+        summary.blocks_scanned, summary.tip_height
+    );
+    Ok(())
+}
+
+fn balance(cli: &Cli) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+
+    let b = wallet.balance();
+    println!("Confirmed:   {}", b.confirmed);
+    // trusted_pending = our own unconfirmed change; untrusted_pending = incoming from others.
+    println!("Unconfirmed: {}", b.trusted_pending + b.untrusted_pending);
+    if b.immature.to_sat() > 0 {
+        println!("Immature:    {} (coinbase, spendable after 100 confirmations)", b.immature);
+    }
+    println!("Total:       {}", b.total());
+    Ok(())
+}
+
+/// Loads the wallet from disk. Needs no password: the database only holds public descriptors.
+fn load(db: &Path) -> anyhow::Result<(Connection, PersistedWallet<Connection>)> {
+    let mut conn = open_existing(db)?;
+    let wallet = Wallet::load()
+        .check_network(NETWORK)
+        .load_wallet(&mut conn)
+        .context("loading wallet")?
+        .ok_or_else(|| anyhow!("{} contains no wallet", db.display()))?;
+    Ok((conn, wallet))
+}
+
+fn connect(cli: &Cli) -> anyhow::Result<chain::Client> {
+    chain::connect(&cli.rpc_url, &cli.rpc_user, &cli.rpc_pass)
 }
 
 fn ensure_new(db: &Path) -> anyhow::Result<()> {
