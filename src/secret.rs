@@ -52,7 +52,6 @@ pub fn save(conn: &Connection, mnemonic: &str, password: &str) -> anyhow::Result
 }
 
 /// Decrypts the stored mnemonic. A wrong password fails the Poly1305 authentication check.
-#[allow(dead_code)] // used by `send` once signing lands
 pub fn load(conn: &Connection, password: &str) -> anyhow::Result<String> {
     let (salt, nonce, ciphertext): (Vec<u8>, Vec<u8>, Vec<u8>) = conn
         .query_row(

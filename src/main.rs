@@ -1,28 +1,27 @@
 mod chain;
+mod keys;
 mod secret;
+mod send;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::bip32::DerivationPath;
-use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::bitcoin::{Network, NetworkKind, SignedAmount};
-use bdk_wallet::descriptor;
-use bdk_wallet::descriptor::IntoWalletDescriptor;
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Network, SignedAmount};
+use bdk_wallet::chain::ChainPosition;
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
-use bdk_wallet::miniscript::{self, Segwitv0};
+use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::chain::ChainPosition;
 use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
 use clap::{Parser, Subcommand};
 
-/// Regtest only for now. Changing this also requires changing the coin type (1') below.
+/// Regtest only for now. Changing this also requires changing the coin type (1') in keys.rs.
 const NETWORK: Network = Network::Regtest;
 
-/// BIP84 account path: purpose 84' (native SegWit) / coin type 1' (test networks) / account 0'.
-const ACCOUNT_PATH: &str = "m/84h/1h/0h";
+/// Used when Core can't estimate fees yet (always the case on a fresh regtest chain).
+const FALLBACK_FEE_RATE_SAT_VB: u64 = 2;
 
 const MIN_PASSWORD_LEN: usize = 8;
 
@@ -65,6 +64,19 @@ enum Command {
     Balance,
     /// Sync, then list wallet transactions, newest first
     History,
+    /// Send bitcoin to an address
+    Send {
+        /// Recipient address
+        address: String,
+        /// Amount in BTC, e.g. 0.5
+        amount: String,
+        /// Fee rate in sat/vB (default: ask Bitcoin Core for an estimate)
+        #[arg(long)]
+        fee_rate: Option<u64>,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,6 +89,9 @@ fn main() -> anyhow::Result<()> {
         Command::Sync => sync(&cli),
         Command::Balance => balance(&cli),
         Command::History => history(&cli),
+        Command::Send { ref address, ref amount, fee_rate, yes } => {
+            send(&cli, address, amount, fee_rate, yes)
+        }
     }
 }
 
@@ -214,6 +229,69 @@ fn history(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn send(
+    cli: &Cli,
+    address: &str,
+    amount: &str,
+    fee_rate: Option<u64>,
+    yes: bool,
+) -> anyhow::Result<()> {
+    // Validate input before touching the wallet. require_network rejects e.g. mainnet addresses.
+    let to = Address::from_str(address)
+        .context("invalid address")?
+        .require_network(NETWORK)
+        .context("address is for a different network")?;
+    let amount = Amount::from_str_in(amount, Denomination::Bitcoin).context("invalid amount")?;
+
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    let rpc = connect(cli)?;
+    chain::sync(&mut wallet, &mut conn, &rpc)?;
+
+    let fee_rate = match fee_rate {
+        Some(rate) => FeeRate::from_sat_per_vb(rate).context("fee rate too large")?,
+        None => send::estimate_fee_rate(&rpc).unwrap_or_else(|| {
+            println!("Node has no fee estimate yet; using {FALLBACK_FEE_RATE_SAT_VB} sat/vB.");
+            FeeRate::from_sat_per_kwu(FALLBACK_FEE_RATE_SAT_VB * 250)
+        }),
+    };
+
+    let draft = send::build(&mut wallet, &to, amount, fee_rate)?;
+    println!();
+    println!("  To:        {to}");
+    println!("  Amount:    {amount}");
+    println!("  Fee:       {} ({} sat/vB)", draft.fee, fee_rate.to_sat_per_vb_ceil());
+    println!("  Change:    {}", draft.change);
+    println!("  Inputs:    {}", draft.inputs);
+    println!("  Total out: {}", amount + draft.fee);
+    println!();
+
+    // Returning here without persisting also discards the change address the builder revealed.
+    if !yes && !confirm("Sign and broadcast?")? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let password = rpassword::prompt_password("Wallet password: ")?;
+    let words = secret::load(&conn, &password)?;
+    let mnemonic = Mnemonic::parse_in(Language::English, words.as_str())
+        .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))?;
+
+    let tx = send::sign(&wallet, &mnemonic, draft.psbt)?;
+    let txid = send::broadcast(&mut wallet, &mut conn, &rpc, tx)?;
+
+    println!("Broadcast: {txid}");
+    println!("Status: unconfirmed. Mine a block on regtest to confirm it.");
+    Ok(())
+}
+
+fn confirm(question: &str) -> anyhow::Result<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
 /// Loads the wallet from disk. Needs no password: the database only holds public descriptors.
 fn load(db: &Path) -> anyhow::Result<(Connection, PersistedWallet<Connection>)> {
     let mut conn = open_existing(db)?;
@@ -260,7 +338,7 @@ fn new_password() -> anyhow::Result<String> {
 /// Returns the first receive address.
 fn init_wallet(db: &Path, mnemonic: &Mnemonic, password: &str) -> anyhow::Result<AddressInfo> {
     let result = (|| {
-        let (external, internal) = descriptors(mnemonic)?;
+        let (external, internal) = keys::descriptors(mnemonic)?;
         let mut conn = Connection::open(db).context("opening wallet database")?;
         let mut tx = conn.transaction()?;
 
@@ -282,26 +360,4 @@ fn init_wallet(db: &Path, mnemonic: &Mnemonic, password: &str) -> anyhow::Result
         let _ = std::fs::remove_file(db);
     }
     result
-}
-
-/// Builds the BIP84 receive (`.../0/*`) and change (`.../1/*`) descriptors from a mnemonic.
-/// The returned strings contain private keys (tprv) and must never be logged or stored.
-fn descriptors(mnemonic: &Mnemonic) -> anyhow::Result<(String, String)> {
-    let external_path = DerivationPath::from_str(&format!("{ACCOUNT_PATH}/0"))?;
-    let internal_path = DerivationPath::from_str(&format!("{ACCOUNT_PATH}/1"))?;
-
-    // (mnemonic, None) = no BIP39 passphrase.
-    let key = (mnemonic.clone(), None::<String>);
-    let secp = Secp256k1::new();
-
-    // NetworkKind::Test makes the keys tprv/tpub, used by testnet, signet and regtest.
-    let (ext, ext_keys) = descriptor!(wpkh((key.clone(), external_path)))?
-        .into_wallet_descriptor(&secp, NetworkKind::Test)?;
-    let (int, int_keys) = descriptor!(wpkh((key, internal_path)))?
-        .into_wallet_descriptor(&secp, NetworkKind::Test)?;
-
-    Ok((
-        ext.to_string_with_secret(&ext_keys),
-        int.to_string_with_secret(&int_keys),
-    ))
 }
