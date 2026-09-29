@@ -1,0 +1,10 @@
+[package]
+name = "bitcoin-wallet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+bdk_bitcoind_rpc = "0.22.0"
+bdk_wallet = { version = "3.2.0", features = ["rusqlite", "keys-bip39"] }
+clap = { version = "4.6.7", features = ["derive"] }
