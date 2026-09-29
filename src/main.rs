@@ -7,13 +7,14 @@ use std::str::FromStr;
 use anyhow::{Context, anyhow, bail};
 use bdk_wallet::bitcoin::bip32::DerivationPath;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::bitcoin::{Network, NetworkKind};
+use bdk_wallet::bitcoin::{Network, NetworkKind, SignedAmount};
 use bdk_wallet::descriptor;
 use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::{self, Segwitv0};
 use bdk_wallet::rusqlite::Connection;
+use bdk_wallet::chain::ChainPosition;
 use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
 use clap::{Parser, Subcommand};
 
@@ -62,6 +63,8 @@ enum Command {
     Sync,
     /// Sync, then show confirmed and unconfirmed balance
     Balance,
+    /// Sync, then list wallet transactions, newest first
+    History,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,6 +76,7 @@ fn main() -> anyhow::Result<()> {
         Command::Addresses => addresses(&cli),
         Command::Sync => sync(&cli),
         Command::Balance => balance(&cli),
+        Command::History => history(&cli),
     }
 }
 
@@ -164,6 +168,49 @@ fn balance(cli: &Cli) -> anyhow::Result<()> {
         println!("Immature:    {} (coinbase, spendable after 100 confirmations)", b.immature);
     }
     println!("Total:       {}", b.total());
+    Ok(())
+}
+
+fn history(cli: &Cli) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    let tip = wallet.latest_checkpoint().height();
+
+    let mut txs: Vec<_> = wallet.transactions().collect();
+    if txs.is_empty() {
+        println!("No transactions yet.");
+        return Ok(());
+    }
+    // Unconfirmed first, then confirmed from newest block to oldest.
+    txs.sort_by_key(|tx| match tx.chain_position {
+        ChainPosition::Unconfirmed { .. } => (0, 0),
+        ChainPosition::Confirmed { anchor, .. } => (1, u32::MAX - anchor.block_id.height),
+    });
+
+    println!("{:<64}  {:>17}  {:>12}  STATUS", "TXID", "AMOUNT", "FEE");
+    for tx in txs {
+        let (sent, received) = wallet.sent_and_received(&tx.tx_node.tx);
+        let net = SignedAmount::from_sat(received.to_sat() as i64 - sent.to_sat() as i64);
+        // Only show fees we paid. BDK can sometimes compute the fee of an incoming tx too (when
+        // the sender spent change from an earlier payment to us), but that fee isn't ours.
+        let fee = match wallet.calculate_fee(&tx.tx_node.tx) {
+            Ok(fee) if sent.to_sat() > 0 => format!("{} sat", fee.to_sat()),
+            _ => "-".to_owned(),
+        };
+        let status = match tx.chain_position {
+            ChainPosition::Unconfirmed { .. } => "unconfirmed".to_owned(),
+            ChainPosition::Confirmed { anchor, .. } => {
+                let confs = tip - anchor.block_id.height + 1;
+                format!("{confs} conf (block {})", anchor.block_id.height)
+            }
+        };
+        println!(
+            "{}  {:>17}  {:>12}  {status}",
+            tx.tx_node.txid,
+            format!("{:+.8}", net.to_btc()),
+            fee
+        );
+    }
     Ok(())
 }
 
