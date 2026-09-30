@@ -13,15 +13,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bdk_wallet::bitcoin::Txid;
-use bdk_wallet::bitcoin::hashes::{Hash, sha256};
+use bdk_wallet::bitcoin::{Address, Amount, Psbt, Txid};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
-use bitcoin_wallet::{NETWORK, chain, history, load};
+use bitcoin_wallet::api::{
+    BroadcastRequest, BroadcastResponse, ErrorBody, PsbtRequest, PsbtResponse, RegisterRequest,
+    RegisterResponse,
+};
+use bitcoin_wallet::send::{self, BuildError};
+use bitcoin_wallet::{NETWORK, chain, history, load, wallet_id};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(about = "Watch-only wallet HTTP API")]
@@ -81,6 +85,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{id}/addresses", get(list_addresses).post(new_address))
         .route("/wallets/{id}/transactions", get(list_transactions))
         .route("/wallets/{id}/transactions/{txid}", get(get_transaction))
+        .route("/wallets/{id}/psbt", post(build_psbt))
+        .route("/wallets/{id}/broadcast", post(broadcast))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -102,19 +108,6 @@ async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-#[derive(Deserialize)]
-struct RegisterRequest {
-    /// Receive descriptor, e.g. `wpkh([fingerprint/84'/1'/0']tpub.../0/*)`
-    external: String,
-    /// Change descriptor, e.g. `wpkh([fingerprint/84'/1'/0']tpub.../1/*)`
-    internal: String,
-}
-
-#[derive(Serialize)]
-struct RegisterResponse {
-    id: String,
-}
-
 /// Registers a watch-only wallet. Idempotent: the id is derived from the descriptors, so
 /// registering the same wallet again returns the same id with 200 instead of 201.
 async fn register_wallet(
@@ -128,8 +121,7 @@ async fn register_wallet(
     }
 
     // Hash the parsed (canonical) form, so formatting differences map to the same wallet.
-    let hash = sha256::Hash::hash(format!("{external}\n{internal}").as_bytes());
-    let id = hash.to_string()[..16].to_owned();
+    let id = wallet_id(&external, &internal);
 
     run_blocking(move || {
         let db = state.db_path(&id);
@@ -178,7 +170,7 @@ async fn balance(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<BalanceResponse>, ApiError> {
-    let balance = with_wallet(state, id, |w| Ok(w.wallet.balance())).await?;
+    let balance = with_wallet(state, id, |w, _| Ok(w.wallet.balance())).await?;
     Ok(Json(BalanceResponse {
         confirmed_sat: balance.confirmed.to_sat(),
         // trusted_pending = our own unconfirmed change; untrusted_pending = incoming from others.
@@ -202,7 +194,7 @@ async fn new_address(
 ) -> Result<(StatusCode, Json<AddressResponse>), ApiError> {
     // Sync first so indexes already paid to on chain count as used; otherwise a fresh or
     // stale wallet would hand out an address that was already used (address reuse).
-    let info = with_wallet(state, id, |w| {
+    let info = with_wallet(state, id, |w, _| {
         let info = w.wallet.reveal_next_address(KeychainKind::External);
         w.wallet.persist(&mut w.conn).map_err(anyhow::Error::from)?;
         Ok(info)
@@ -218,7 +210,7 @@ async fn list_addresses(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<AddressResponse>>, ApiError> {
     let addresses =
-        with_wallet(state, id, |w| Ok(history::receive_addresses(&w.wallet))).await?;
+        with_wallet(state, id, |w, _| Ok(history::receive_addresses(&w.wallet))).await?;
     Ok(Json(
         addresses
             .into_iter()
@@ -256,7 +248,7 @@ async fn list_transactions(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<TransactionResponse>>, ApiError> {
-    let txs = with_wallet(state, id, |w| Ok(history::transactions(&w.wallet))).await?;
+    let txs = with_wallet(state, id, |w, _| Ok(history::transactions(&w.wallet))).await?;
     Ok(Json(txs.into_iter().map(Into::into).collect()))
 }
 
@@ -266,13 +258,67 @@ async fn get_transaction(
     Path((id, txid)): Path<(String, String)>,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let txid = Txid::from_str(&txid).map_err(|_| ApiError::bad_request("invalid txid"))?;
-    let tx = with_wallet(state, id, move |w| {
+    let tx = with_wallet(state, id, move |w, _| {
         history::transaction(&w.wallet, txid).ok_or_else(|| {
             ApiError::not_found("transaction not found: not a wallet transaction, or dropped from the mempool")
         })
     })
     .await?;
     Ok(Json(tx.into()))
+}
+
+/// Builds an UNSIGNED transaction. The server picks coins, fee and change, but can't sign:
+/// the client must review the PSBT, sign it locally, and send it back to /broadcast.
+async fn build_psbt(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(req): Json<PsbtRequest>,
+) -> Result<Json<PsbtResponse>, ApiError> {
+    let to = Address::from_str(&req.address)
+        .map_err(|_| ApiError::bad_request("invalid address"))?
+        .require_network(NETWORK)
+        .map_err(|_| ApiError::bad_request("address is for a different network"))?;
+    let amount = Amount::from_sat(req.amount_sat);
+
+    let (draft, fee_rate) = with_wallet(state, id, move |w, rpc| {
+        let fee_rate = send::choose_fee_rate(rpc, req.fee_rate_sat_vb)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let draft = send::build(&mut w.wallet, &to, amount, fee_rate).map_err(|e| match e {
+            BuildError::Other(e) => ApiError::from(e),
+            e => ApiError::bad_request(e.to_string()),
+        })?;
+        Ok((draft, fee_rate))
+    })
+    .await?;
+
+    Ok(Json(PsbtResponse {
+        psbt: draft.psbt.to_string(),
+        amount_sat: amount.to_sat(),
+        fee_sat: draft.fee.to_sat(),
+        change_sat: draft.change.to_sat(),
+        fee_rate_sat_vb: fee_rate.to_sat_per_vb_ceil(),
+    }))
+}
+
+/// Finalizes a PSBT the client signed and broadcasts it. Finalizing needs only the public
+/// descriptors; it fails unless every input carries a valid-looking signature.
+async fn broadcast(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(req): Json<BroadcastRequest>,
+) -> Result<Json<BroadcastResponse>, ApiError> {
+    let psbt = Psbt::from_str(&req.psbt)
+        .map_err(|e| ApiError::bad_request(format!("invalid PSBT: {e}")))?;
+
+    let txid = with_wallet(state, id, move |w, rpc| {
+        let tx = send::finalize(&w.wallet, psbt)
+            .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+        let WalletEntry { conn, wallet } = w;
+        // TODO: tell "node unreachable" (502) apart from "node rejected the tx" (400).
+        send::broadcast(wallet, conn, rpc, tx).map_err(|e| ApiError::bad_request(format!("{e:#}")))
+    })
+    .await?;
+    Ok(Json(BroadcastResponse { txid: txid.to_string() }))
 }
 
 impl AppState {
@@ -308,14 +354,14 @@ impl AppState {
 async fn with_wallet<T: Send + 'static>(
     state: SharedState,
     id: String,
-    f: impl FnOnce(&mut WalletEntry) -> Result<T, ApiError> + Send + 'static,
+    f: impl FnOnce(&mut WalletEntry, &chain::Client) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     run_blocking(move || {
         let entry = state.wallet(&id)?;
         let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
         let WalletEntry { conn, wallet } = &mut *entry;
         chain::sync(wallet, conn, &state.rpc)?;
-        f(&mut entry)
+        f(&mut entry, &state.rpc)
     })
     .await
 }
@@ -356,11 +402,6 @@ impl From<bdk_wallet::rusqlite::Error> for ApiError {
     fn from(e: bdk_wallet::rusqlite::Error) -> Self {
         anyhow::Error::from(e).into()
     }
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
 }
 
 impl IntoResponse for ApiError {

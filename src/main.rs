@@ -4,17 +4,16 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, Psbt, Txid};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
-use bitcoin_wallet::{NETWORK, chain, history, keys, load, secret, send};
+use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
+use bitcoin_wallet::client::{ApiClient, ApiError};
+use bitcoin_wallet::{NETWORK, chain, history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
-
-/// Used when Core can't estimate fees yet (always the case on a fresh regtest chain).
-const FALLBACK_FEE_RATE_SAT_VB: u64 = 2;
 
 const MIN_PASSWORD_LEN: usize = 8;
 
@@ -49,6 +48,12 @@ enum Command {
     Restore,
     /// Print the wallet's public descriptors (safe to share with a watch-only server)
     Export,
+    /// Register this wallet (public descriptors only) with a watch-only API server
+    Register {
+        /// API server URL
+        #[arg(long, env = "WALLET_API")]
+        server: String,
+    },
     /// Reveal a new receive address
     Address,
     /// List revealed receive addresses and whether they have been used
@@ -71,6 +76,10 @@ enum Command {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Let this API server build and broadcast the transaction; we only review and sign.
+        /// Without it, everything happens locally against Bitcoin Core.
+        #[arg(long, env = "WALLET_API")]
+        server: Option<String>,
     },
     /// Show a transaction's confirmation status
     Status {
@@ -94,13 +103,18 @@ fn main() -> anyhow::Result<()> {
         Command::Create => create(&cli.db),
         Command::Restore => restore(&cli.db),
         Command::Export => export(&cli.db),
+        Command::Register { ref server } => register(&cli.db, server),
         Command::Address => address(&cli),
         Command::Addresses => addresses(&cli),
         Command::Sync => sync(&cli),
         Command::Balance => balance(&cli),
         Command::History => history(&cli),
-        Command::Send { ref address, ref amount, fee_rate, yes } => {
-            send(&cli, address, amount, fee_rate, yes)
+        Command::Send { ref address, ref amount, fee_rate, yes, ref server } => {
+            let (to, amount) = parse_payment(address, amount)?;
+            match server {
+                Some(server) => send_via_server(&cli.db, server, &to, amount, fee_rate, yes),
+                None => send_local(&cli, &to, amount, fee_rate, yes),
+            }
         }
         Command::Status { ref txid, watch, until, interval } => {
             status(&cli, txid, watch, until, interval)
@@ -155,6 +169,18 @@ fn export(db: &Path) -> anyhow::Result<()> {
     // Public descriptors only: anyone holding these can watch the wallet, but not spend.
     println!("external: {}", wallet.public_descriptor(KeychainKind::External));
     println!("internal: {}", wallet.public_descriptor(KeychainKind::Internal));
+    Ok(())
+}
+
+fn register(db: &Path, server: &str) -> anyhow::Result<()> {
+    let (_, wallet) = load(db)?;
+    // Only public descriptors leave this machine.
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+    };
+    let response = ApiClient::new(server).register(&request)?;
+    println!("Registered with {server} as wallet {}", response.id);
     Ok(())
 }
 
@@ -258,41 +284,32 @@ fn status(cli: &Cli, txid: &str, watch: bool, until: u32, interval: u64) -> anyh
     }
 }
 
-fn send(
-    cli: &Cli,
-    address: &str,
-    amount: &str,
-    fee_rate: Option<u64>,
-    yes: bool,
-) -> anyhow::Result<()> {
-    // Validate input before touching the wallet. require_network rejects e.g. mainnet addresses.
+/// Validates the recipient and amount before anything touches the wallet.
+fn parse_payment(address: &str, amount: &str) -> anyhow::Result<(Address, Amount)> {
+    // require_network rejects addresses for other networks, e.g. mainnet on regtest.
     let to = Address::from_str(address)
         .context("invalid address")?
         .require_network(NETWORK)
         .context("address is for a different network")?;
     let amount = Amount::from_str_in(amount, Denomination::Bitcoin).context("invalid amount")?;
+    Ok((to, amount))
+}
 
+/// Builds, signs and broadcasts everything locally, talking straight to Bitcoin Core.
+fn send_local(
+    cli: &Cli,
+    to: &Address,
+    amount: Amount,
+    fee_rate: Option<u64>,
+    yes: bool,
+) -> anyhow::Result<()> {
     let (mut conn, mut wallet) = load(&cli.db)?;
     let rpc = connect(cli)?;
     chain::sync(&mut wallet, &mut conn, &rpc)?;
 
-    let fee_rate = match fee_rate {
-        Some(rate) => FeeRate::from_sat_per_vb(rate).context("fee rate too large")?,
-        None => send::estimate_fee_rate(&rpc).unwrap_or_else(|| {
-            println!("Node has no fee estimate yet; using {FALLBACK_FEE_RATE_SAT_VB} sat/vB.");
-            FeeRate::from_sat_per_kwu(FALLBACK_FEE_RATE_SAT_VB * 250)
-        }),
-    };
-
-    let draft = send::build(&mut wallet, &to, amount, fee_rate)?;
-    println!();
-    println!("  To:        {to}");
-    println!("  Amount:    {amount}");
-    println!("  Fee:       {} ({} sat/vB)", draft.fee, fee_rate.to_sat_per_vb_ceil());
-    println!("  Change:    {}", draft.change);
-    println!("  Inputs:    {}", draft.inputs);
-    println!("  Total out: {}", amount + draft.fee);
-    println!();
+    let fee_rate = send::choose_fee_rate(&rpc, fee_rate)?;
+    let draft = send::build(&mut wallet, to, amount, fee_rate)?;
+    print_summary(to, amount, draft.fee, draft.change, draft.inputs);
 
     // Returning here without persisting also discards the change address the builder revealed.
     if !yes && !confirm("Sign and broadcast?")? {
@@ -300,17 +317,83 @@ fn send(
         return Ok(());
     }
 
-    let password = rpassword::prompt_password("Wallet password: ")?;
-    let words = secret::load(&conn, &password)?;
-    let mnemonic = Mnemonic::parse_in(Language::English, words.as_str())
-        .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))?;
-
-    let tx = send::sign(&wallet, &mnemonic, draft.psbt)?;
+    let mnemonic = unlock(&conn)?;
+    let mut psbt = draft.psbt;
+    send::sign(&wallet, &mnemonic, &mut psbt)?;
+    let tx = send::finalize(&wallet, psbt)?;
     let txid = send::broadcast(&mut wallet, &mut conn, &rpc, tx)?;
 
     println!("Broadcast: {txid}");
     println!("Status: unconfirmed. Mine a block on regtest to confirm it.");
     Ok(())
+}
+
+/// The non-custodial API flow: the server builds an unsigned PSBT, we verify it ourselves,
+/// sign it locally, and hand it back for broadcasting. Our keys never leave this machine.
+fn send_via_server(
+    db: &Path,
+    server: &str,
+    to: &Address,
+    amount: Amount,
+    fee_rate: Option<u64>,
+    yes: bool,
+) -> anyhow::Result<()> {
+    let (conn, wallet) = load(db)?;
+    let api = ApiClient::new(server);
+    let id = wallet_id(
+        &wallet.public_descriptor(KeychainKind::External).to_string(),
+        &wallet.public_descriptor(KeychainKind::Internal).to_string(),
+    );
+
+    let request =
+        PsbtRequest { address: to.to_string(), amount_sat: amount.to_sat(), fee_rate_sat_vb: fee_rate };
+    let response = api.build_psbt(&id, &request).map_err(|e| {
+        match e.downcast_ref::<ApiError>() {
+            Some(api_error) if api_error.status == 404 => {
+                e.context("this wallet isn't registered; run `register --server <url>` first")
+            }
+            _ => e,
+        }
+    })?;
+    let mut psbt = Psbt::from_str(&response.psbt).context("server returned an invalid PSBT")?;
+
+    // Don't trust the server's summary: work out what the PSBT really does and refuse
+    // anything that isn't exactly the payment we asked for plus our own change.
+    let review = send::review(&wallet, &psbt, to, amount).context("refusing to sign")?;
+    println!("Verified the server's PSBT: pays exactly the recipient, all other outputs are yours.");
+    print_summary(to, amount, review.fee, review.change, review.inputs);
+
+    if !yes && !confirm("Sign and send to the server for broadcast?")? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let mnemonic = unlock(&conn)?;
+    send::sign(&wallet, &mnemonic, &mut psbt)?;
+    let response = api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() })?;
+
+    println!("Broadcast: {}", response.txid);
+    println!("Status: unconfirmed. Mine a block on regtest to confirm it.");
+    Ok(())
+}
+
+fn print_summary(to: &Address, amount: Amount, fee: Amount, change: Amount, inputs: usize) {
+    println!();
+    println!("  To:        {to}");
+    println!("  Amount:    {amount}");
+    println!("  Fee:       {fee}");
+    println!("  Change:    {change}");
+    println!("  Inputs:    {inputs}");
+    println!("  Total out: {}", amount + fee);
+    println!();
+}
+
+/// Asks for the wallet password and decrypts the mnemonic. Only needed for signing.
+fn unlock(conn: &Connection) -> anyhow::Result<Mnemonic> {
+    let password = rpassword::prompt_password("Wallet password: ")?;
+    let words = secret::load(conn, &password)?;
+    Mnemonic::parse_in(Language::English, words.as_str())
+        .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))
 }
 
 fn confirm(question: &str) -> anyhow::Result<bool> {
