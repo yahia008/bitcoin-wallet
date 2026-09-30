@@ -4,6 +4,9 @@
 //! scripts. Esplora is an address index: we ask it about our scripts directly, so there's no
 //! node to run and the birthday doesn't matter, but the server learns which addresses are ours.
 
+use std::thread;
+use std::time::Duration;
+
 use anyhow::{Context, bail};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_bitcoind_rpc::bitcoincore_rpc::{self, Auth, RpcApi, jsonrpc};
@@ -18,6 +21,9 @@ use crate::{default_rpc_url, parse_network};
 
 /// Give up on an Esplora request after this long, so a stuck server can't hang us forever.
 const ESPLORA_TIMEOUT_SECS: u64 = 30;
+/// Tries per Esplora call when the connection itself fails (dropped, reset, timed out).
+/// esplora-client only retries HTTP 429/500/503 answers, not failed connections.
+const ESPLORA_ATTEMPTS: u32 = 3;
 /// Esplora full scans stop after this many unused addresses in a row on each keychain.
 /// 20 is the BIP44 gap limit, which other wallets restoring the same seed also use.
 const STOP_GAP: usize = 20;
@@ -117,8 +123,7 @@ fn connect_core(url: &str, user: &str, pass: &str, network: Network) -> anyhow::
 /// (Esplora has no "which chain are you" call).
 fn connect_esplora(url: &str, network: Network) -> anyhow::Result<Backend> {
     let client = esplora_client::Builder::new(url).timeout(ESPLORA_TIMEOUT_SECS).build_blocking();
-    let genesis = client
-        .get_block_hash(0)
+    let genesis = with_retry(|| client.get_block_hash(0))
         .with_context(|| format!("cannot reach Esplora at {url}"))?;
     if genesis != genesis_block(network).block_hash() {
         bail!("Esplora at {url} is not a {network} server (different genesis block)");
@@ -172,7 +177,7 @@ impl Backend {
                 Ok(u32::try_from(height)?)
             }
             Backend::Esplora(client) => {
-                client.get_height().context("asking Esplora for the chain tip")
+                with_retry(|| client.get_height()).context("asking Esplora for the chain tip")
             }
         }
     }
@@ -188,7 +193,7 @@ impl Backend {
                 Some(FeeRate::from_sat_per_kwu(btc_per_kvb.to_sat() / 4))
             }
             Backend::Esplora(client) => {
-                let estimates = client.get_fee_estimates().ok()?;
+                let estimates = with_retry(|| client.get_fee_estimates()).ok()?;
                 // sat/vB (a float) -> sat/kwu: 1 vbyte = 4 weight units, so x1000/4.
                 let sat_vb = esplora_client::convert_fee_rate(target.into(), estimates)?;
                 Some(FeeRate::from_sat_per_kwu((sat_vb * 250.0).ceil() as u64))
@@ -202,10 +207,30 @@ impl Backend {
             Backend::Core(rpc) => {
                 rpc.send_raw_transaction(tx).context("broadcasting transaction")
             }
+            // Not retried: if the first try reached the server but the reply got lost, a retry
+            // would be refused as already-known and we'd wrongly report a failure.
             Backend::Esplora(client) => {
                 client.broadcast(tx).context("broadcasting transaction")?;
                 Ok(tx.compute_txid())
             }
+        }
+    }
+}
+
+/// Runs an Esplora call, retrying with a short backoff when the connection fails. Answers
+/// from the server (including errors like 400) are returned as they are.
+fn with_retry<T>(
+    mut call: impl FnMut() -> Result<T, esplora_client::Error>,
+) -> Result<T, esplora_client::Error> {
+    let mut attempt = 1;
+    loop {
+        match call() {
+            Err(esplora_client::Error::Minreq(e)) if attempt < ESPLORA_ATTEMPTS => {
+                eprintln!("Esplora connection failed ({e}), retrying...");
+                thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+                attempt += 1;
+            }
+            result => return result,
         }
     }
 }
@@ -321,12 +346,14 @@ fn sync_esplora(
     wallet: &mut PersistedWallet<Connection>,
     client: &BlockingClient,
 ) -> anyhow::Result<String> {
-    let request = wallet.start_full_scan().build();
-    let update = client
-        .full_scan(request, STOP_GAP, PARALLEL_REQUESTS)
-        // bdk_esplora boxes the error; unbox it so BackendError::find can see it.
-        .map_err(|e| anyhow::Error::from(*e))
-        .context("scanning addresses with Esplora")?;
+    // A retry redoes the whole scan: bdk_esplora doesn't let us resume one mid-way.
+    let update = with_retry(|| {
+        client
+            .full_scan(wallet.start_full_scan().build(), STOP_GAP, PARALLEL_REQUESTS)
+            // bdk_esplora boxes the error; unbox it so with_retry and BackendError::find see it.
+            .map_err(|e| *e)
+    })
+    .context("scanning addresses with Esplora")?;
     wallet.apply_update(update)?;
     Ok("addresses via Esplora".to_owned())
 }
