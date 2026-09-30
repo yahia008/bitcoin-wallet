@@ -15,7 +15,7 @@ It currently runs on **regtest** only.
 - Fresh receive addresses, with tracking of which ones have been used
 - Sync with Bitcoin Core (blocks and mempool); confirmed, unconfirmed and immature balance
 - Transaction history with fees and confirmation counts
-- Coin selection, fee estimation, PSBT signing and broadcast
+- Coin selection, fee estimation (`send --fee fast|normal|slow` targets 2, 6 or 144 blocks, or `--fee-rate N` for an exact sat/vB; never below 1 sat/vB), PSBT signing and broadcast
 - Confirmation tracking (`status --watch`, or polling the API)
 - Only the account key (m/84'/1'/0') is kept, encrypted at rest (Argon2id + XChaCha20-Poly1305); the mnemonic is never stored. Wallet state in SQLite
 
@@ -93,7 +93,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
 | GET | `/wallets/{id}/transactions` | | `[{txid, net_sat, fee_sat, confirmed, confirmations, block_height}]` |
 | GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations) |
-| POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?}` | unsigned PSBT (base64) + summary |
+| POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?, fee_priority?}` | unsigned PSBT (base64) + summary. `fee_priority` is `fast`, `normal` (default) or `slow`; an exact `fee_rate_sat_vb` overrides it |
 | POST | `/wallets/{id}/broadcast` | `{psbt}` signed PSBT (base64) | `{txid}` |
 
 - **Auth:** every `/wallets/{id}/...` request needs `Authorization: Bearer <token>`. The token is returned once, at registration; the server stores only its SHA-256 hash.

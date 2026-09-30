@@ -13,6 +13,7 @@ use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
 use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
 use bitcoin_wallet::client::{self, ApiClient, ApiError};
 use bitcoin_wallet::chain::{self, ChainArgs};
+use bitcoin_wallet::send::FeePriority;
 use bitcoin_wallet::{history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
 
@@ -67,9 +68,12 @@ enum Command {
         address: String,
         /// Amount in BTC, e.g. 0.5
         amount: String,
-        /// Fee rate in sat/vB (default: ask the backend for an estimate)
-        #[arg(long)]
+        /// Exact fee rate in sat/vB, instead of an estimate
+        #[arg(long, conflicts_with = "fee")]
         fee_rate: Option<u64>,
+        /// How soon to confirm; the backend estimates a fee rate for it
+        #[arg(long, value_enum, default_value_t = FeePriority::Normal)]
+        fee: FeePriority,
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -106,11 +110,11 @@ fn main() -> anyhow::Result<()> {
         Command::Sync => sync(&cli),
         Command::Balance => balance(&cli),
         Command::History => history(&cli),
-        Command::Send { ref address, ref amount, fee_rate, yes, ref server } => {
+        Command::Send { ref address, ref amount, fee_rate, fee, yes, ref server } => {
             let (to, amount) = parse_payment(address, amount, cli.chain.network)?;
             match server {
-                Some(server) => send_via_server(&cli, server, &to, amount, fee_rate, yes),
-                None => send_local(&cli, &to, amount, fee_rate, yes),
+                Some(server) => send_via_server(&cli, server, &to, amount, fee_rate, fee, yes),
+                None => send_local(&cli, &to, amount, fee_rate, fee, yes),
             }
         }
         Command::Status { ref txid, watch, until, interval } => {
@@ -335,15 +339,16 @@ fn send_local(
     to: &Address,
     amount: Amount,
     fee_rate: Option<u64>,
+    priority: FeePriority,
     yes: bool,
 ) -> anyhow::Result<()> {
     let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
     let backend = cli.chain.connect()?;
     chain::sync(&mut wallet, &mut conn, &backend)?;
 
-    let fee_rate = send::choose_fee_rate(&backend, fee_rate)?;
+    let fee_rate = send::choose_fee_rate(&backend, fee_rate, priority)?;
     let draft = send::build(&mut wallet, to, amount, fee_rate, &[])?;
-    print_summary(to, amount, draft.fee, draft.change, draft.inputs);
+    print_summary(to, amount, draft.fee, draft.change, &draft.psbt);
 
     // Returning here without persisting also discards the change address the builder revealed.
     if !yes && !confirm("Sign and broadcast?")? {
@@ -370,6 +375,7 @@ fn send_via_server(
     to: &Address,
     amount: Amount,
     fee_rate: Option<u64>,
+    priority: FeePriority,
     yes: bool,
 ) -> anyhow::Result<()> {
     let (conn, wallet) = load(&cli.db, cli.chain.network)?;
@@ -382,8 +388,12 @@ fn send_via_server(
         &wallet.public_descriptor(KeychainKind::Internal).to_string(),
     );
 
-    let request =
-        PsbtRequest { address: to.to_string(), amount_sat: amount.to_sat(), fee_rate_sat_vb: fee_rate };
+    let request = PsbtRequest {
+        address: to.to_string(),
+        amount_sat: amount.to_sat(),
+        fee_rate_sat_vb: fee_rate,
+        fee_priority: priority,
+    };
     let response = api.build_psbt(&id, &request).map_err(|e| match status_of(&e) {
         Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
         Some(401) => e.context("the server rejected this wallet's API token"),
@@ -395,7 +405,7 @@ fn send_via_server(
     // anything that isn't exactly the payment we asked for plus our own change.
     let review = send::review(&wallet, &psbt, to, amount).context("refusing to sign")?;
     println!("Verified the server's PSBT: pays exactly the recipient, all other outputs are yours.");
-    print_summary(to, amount, review.fee, review.change, review.inputs);
+    print_summary(to, amount, review.fee, review.change, &psbt);
 
     if !yes && !confirm("Sign and send to the server for broadcast?")? {
         println!("Cancelled.");
@@ -411,13 +421,15 @@ fn send_via_server(
     Ok(())
 }
 
-fn print_summary(to: &Address, amount: Amount, fee: Amount, change: Amount, inputs: usize) {
+/// Everything here comes from the PSBT itself (or our own review of it), not from the server.
+fn print_summary(to: &Address, amount: Amount, fee: Amount, change: Amount, psbt: &Psbt) {
+    let rate = send::signed_fee_rate(&psbt.unsigned_tx, fee);
     println!();
     println!("  To:        {to}");
     println!("  Amount:    {amount}");
-    println!("  Fee:       {fee}");
+    println!("  Fee:       {fee} (~{rate:.1} sat/vB)");
     println!("  Change:    {change}");
-    println!("  Inputs:    {inputs}");
+    println!("  Inputs:    {}", psbt.inputs.len());
     println!("  Total out: {}", amount + fee);
     println!();
 }

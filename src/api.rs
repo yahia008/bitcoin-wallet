@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::send::FeePriority;
+
 #[derive(Serialize, Deserialize)]
 pub struct RegisterRequest {
     /// Receive descriptor, e.g. `wpkh([fingerprint/84'/1'/0']tpub.../0/*)`
@@ -28,9 +30,12 @@ pub struct RegisterResponse {
 pub struct PsbtRequest {
     pub address: String,
     pub amount_sat: u64,
-    /// Omit to let the server ask Bitcoin Core for an estimate.
+    /// An exact fee rate. Omit to let the server estimate one for `fee_priority`.
     #[serde(default)]
     pub fee_rate_sat_vb: Option<u64>,
+    /// `fast`, `normal` (default) or `slow`. Ignored when `fee_rate_sat_vb` is set.
+    #[serde(default)]
+    pub fee_priority: FeePriority,
 }
 
 /// An unsigned PSBT plus the server's summary of it. Signers must not trust the summary;

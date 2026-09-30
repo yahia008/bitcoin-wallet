@@ -476,7 +476,7 @@ async fn build_psbt(
     let amount = Amount::from_sat(req.amount_sat);
 
     let (draft, fee_rate) = with_wallet(state, id, token, move |w, backend| {
-        let fee_rate = send::choose_fee_rate(backend, req.fee_rate_sat_vb)
+        let fee_rate = send::choose_fee_rate(backend, req.fee_rate_sat_vb, req.fee_priority)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let now = Instant::now();
         let reserved = w.reserved.active(now);

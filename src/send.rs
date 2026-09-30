@@ -19,29 +19,72 @@ use bdk_wallet::error::CreateTxError;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Wallet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::chain::Backend;
 use crate::keys;
 
-/// Aim for confirmation within this many blocks when asking for a fee estimate.
-const CONF_TARGET: u16 = 6;
+/// How soon the user wants a transaction confirmed, when they don't pick an exact fee rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum FeePriority {
+    /// Next block or two
+    Fast,
+    /// Within about an hour
+    #[default]
+    Normal,
+    /// Within about a day; cheapest
+    Slow,
+}
+
+impl FeePriority {
+    /// Confirmation target in blocks, as fee estimators take it. Core treats 1 as 2 anyway.
+    pub fn target_blocks(self) -> u16 {
+        match self {
+            FeePriority::Fast => 2,
+            FeePriority::Normal => 6,
+            FeePriority::Slow => 144,
+        }
+    }
+}
 
 /// Used when the backend has no fee estimate (always the case on a fresh regtest chain).
 pub const FALLBACK_FEE_RATE_SAT_VB: u64 = 2;
 
-/// The caller's fee rate if given, else the backend's estimate, else the fallback.
+/// The caller's fee rate if given, else the backend's estimate for `priority`, else the
+/// fallback.
 pub fn choose_fee_rate(
     backend: &Backend,
     requested_sat_vb: Option<u64>,
+    priority: FeePriority,
 ) -> anyhow::Result<FeeRate> {
     match requested_sat_vb {
         Some(rate) => FeeRate::from_sat_per_vb(rate).context("fee rate too large"),
         None => Ok(backend
-            .estimate_fee_rate(CONF_TARGET)
+            .estimate_fee_rate(priority.target_blocks())
             // Estimates can dip below 1 sat/vB on quiet test networks, and many nodes
             // won't relay transactions that cheap.
             .map(|rate| rate.max(FeeRate::BROADCAST_MIN))
             .unwrap_or(FeeRate::from_sat_per_kwu(FALLBACK_FEE_RATE_SAT_VB * 250))),
     }
+}
+
+/// Weight a P2WPKH input's witness adds once signed: item count (1) + signature with its
+/// length byte (1 + up to 73) + compressed public key with its length byte (1 + 33).
+const P2WPKH_WITNESS_WEIGHT: u64 = 1 + 1 + 73 + 1 + 33;
+
+/// The SegWit marker and flag bytes a signed transaction gains (1 weight unit each).
+const SEGWIT_HEADER_WEIGHT: u64 = 2;
+
+/// The fee rate `tx` will pay once signed, in sat/vB. The unsigned transaction has no
+/// witnesses yet, so add the largest a P2WPKH signature can make them; the real rate comes
+/// out the same or slightly higher.
+pub fn signed_fee_rate(tx: &Transaction, fee: Amount) -> f64 {
+    let weight = tx.weight().to_wu()
+        + SEGWIT_HEADER_WEIGHT
+        + P2WPKH_WITNESS_WEIGHT * tx.input.len() as u64;
+    // 1 vbyte = 4 weight units, rounded up like the network does.
+    fee.to_sat() as f64 / weight.div_ceil(4) as f64
 }
 
 /// An unsigned transaction plus the numbers the user should check before signing.
@@ -380,6 +423,27 @@ mod tests {
         sign(&wallet, &account_key(), &mut psbt).unwrap();
         let tx = finalize(&wallet, psbt).unwrap();
         assert!(tx.input.iter().all(|input| !input.witness.is_empty()));
+    }
+
+    /// The pre-signing estimate may only err low, and not by much.
+    #[test]
+    fn signed_fee_rate_matches_real_rate() {
+        let (wallet, mut psbt) = setup();
+        let fee = psbt.fee().unwrap();
+        let estimate = signed_fee_rate(&psbt.unsigned_tx, fee);
+        sign(&wallet, &account_key(), &mut psbt).unwrap();
+        let tx = finalize(&wallet, psbt).unwrap();
+        let real = fee.to_sat() as f64 / tx.vsize() as f64;
+        assert!(estimate <= real && estimate > real * 0.98, "estimate {estimate}, real {real}");
+    }
+
+    #[test]
+    fn fee_priority_json_names() {
+        let json = serde_json::to_string(&[FeePriority::Fast, FeePriority::Slow]).unwrap();
+        assert_eq!(json, r#"["fast","slow"]"#);
+        let parsed: FeePriority = serde_json::from_str(r#""normal""#).unwrap();
+        assert_eq!(parsed, FeePriority::Normal);
+        assert!(FeePriority::Fast.target_blocks() < FeePriority::Slow.target_blocks());
     }
 
     #[test]

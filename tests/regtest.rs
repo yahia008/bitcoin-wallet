@@ -75,6 +75,7 @@ fn non_custodial_send_flow() {
         address: dest.to_string(),
         amount_sat: amount.to_sat(),
         fee_rate_sat_vb: Some(2),
+        fee_priority: Default::default(),
     };
     let built = api.build_psbt(&id, &request).unwrap();
     let mut psbt = Psbt::from_str(&built.psbt).unwrap();
