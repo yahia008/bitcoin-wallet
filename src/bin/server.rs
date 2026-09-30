@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Error as RpcError, jsonrpc};
-use bdk_wallet::bitcoin::{Address, Amount, OutPoint, Psbt, Transaction, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, Network, OutPoint, Psbt, Transaction, Txid};
 use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::bitcoin::hex::DisplayHex;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
@@ -31,7 +31,7 @@ use bitcoin_wallet::api::{
     RegisterResponse,
 };
 use bitcoin_wallet::send::{self, BuildError};
-use bitcoin_wallet::{NETWORK, chain, history, load, wallet_id};
+use bitcoin_wallet::{chain, default_rpc_url, history, load, parse_network, wallet_id};
 use chacha20poly1305::aead::Generate;
 use clap::Parser;
 use serde::Serialize;
@@ -47,9 +47,14 @@ struct Args {
     #[arg(long, env = "LISTEN", default_value = "127.0.0.1:3000")]
     listen: SocketAddr,
 
-    /// Bitcoin Core RPC URL
-    #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:18443")]
-    rpc_url: String,
+    /// Which chain registered wallets live on: regtest, signet, testnet or testnet4.
+    /// Use a separate data dir per network.
+    #[arg(long, env = "NETWORK", default_value = "regtest", value_parser = parse_network)]
+    network: Network,
+
+    /// Bitcoin Core RPC URL [default: localhost on the network's default port]
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Option<String>,
 
     /// Bitcoin Core RPC username
     #[arg(long, env = "RPC_USER", default_value = "wallet")]
@@ -176,6 +181,7 @@ fn spent_coins(tx: &Transaction) -> impl Iterator<Item = OutPoint> + '_ {
 
 struct AppState {
     data_dir: PathBuf,
+    network: Network,
     rpc: chain::Client,
     /// Wallets opened so far. Each has its own lock, so requests for different wallets
     /// don't wait on each other; requests for the same wallet run one at a time.
@@ -189,9 +195,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     std::fs::create_dir_all(&args.data_dir)?;
-    let rpc = chain::connect(&args.rpc_url, &args.rpc_user, &args.rpc_pass)?;
+    let rpc_url = args.rpc_url.unwrap_or_else(|| default_rpc_url(args.network));
+    let rpc = chain::connect(&rpc_url, &args.rpc_user, &args.rpc_pass, args.network)?;
     let state = Arc::new(AppState {
         data_dir: args.data_dir,
+        network: args.network,
         rpc,
         wallets: Mutex::new(HashMap::new()),
     });
@@ -217,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    println!("Listening on http://{}", args.listen);
+    println!("Listening on http://{} ({})", args.listen, args.network);
     // connect_info lets handlers and middleware see the caller's address (for rate limiting).
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
@@ -269,7 +277,7 @@ async fn register_wallet(
         }
 
         let token = new_token();
-        let result = create_wallet(&db, external, internal, birthday, &token);
+        let result = create_wallet(&db, state.network, external, internal, birthday, &token);
         if result.is_err() {
             let _ = std::fs::remove_file(&db);
         }
@@ -282,6 +290,7 @@ async fn register_wallet(
 /// Writes the wallet, its birthday and its token hash to `db` in one SQLite transaction.
 fn create_wallet(
     db: &std::path::Path,
+    network: Network,
     external: String,
     internal: String,
     birthday: u32,
@@ -290,9 +299,9 @@ fn create_wallet(
     let mut conn = Connection::open(db)?;
     let mut tx = conn.transaction()?;
     Wallet::create(external, internal)
-        .network(NETWORK)
+        .network(network)
         .create_wallet(&mut tx)
-        // e.g. mainnet xpub on a regtest server.
+        // e.g. mainnet xpub on a testnet4 server.
         .map_err(|e| ApiError::bad_request(format!("invalid wallet: {e}")))?;
     chain::save_birthday(&tx, birthday)?;
     tx.execute(
@@ -476,7 +485,7 @@ async fn build_psbt(
 ) -> Result<Json<PsbtResponse>, ApiError> {
     let to = Address::from_str(&req.address)
         .map_err(|_| ApiError::bad_request("invalid address"))?
-        .require_network(NETWORK)
+        .require_network(state.network)
         .map_err(|_| ApiError::bad_request("address is for a different network"))?;
     let amount = Amount::from_sat(req.amount_sat);
 
@@ -566,7 +575,7 @@ impl AppState {
         if !db.exists() {
             return Err(ApiError::not_found("wallet not found"));
         }
-        let (conn, wallet) = load(&db)?;
+        let (conn, wallet) = load(&db, self.network)?;
         let token_hash = conn
             .query_row("SELECT hash FROM api_token WHERE id = 0", [], |row| row.get::<_, Vec<u8>>(0))
             .optional()

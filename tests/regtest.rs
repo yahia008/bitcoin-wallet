@@ -11,14 +11,14 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
-use bdk_wallet::bitcoin::{Address, Amount, Psbt, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, Network, Psbt, Txid};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::{KeychainKind, Wallet};
 use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
 use bitcoin_wallet::client::{ApiClient, ApiError};
-use bitcoin_wallet::{NETWORK, keys, send, wallet_id};
+use bitcoin_wallet::{keys, send, wallet_id};
 use serde_json::Value;
 
 const RPC_URL: &str = "http://127.0.0.1:18443";
@@ -34,7 +34,7 @@ fn non_custodial_send_flow() {
         Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
     let mnemonic = mnemonic.into_key();
     let (ext, int) = keys::descriptors(&mnemonic).unwrap();
-    let local = Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap();
+    let local = Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
     let external = local.public_descriptor(KeychainKind::External).to_string();
     let internal = local.public_descriptor(KeychainKind::Internal).to_string();
 
@@ -62,13 +62,13 @@ fn non_custodial_send_flow() {
         .as_str()
         .unwrap()
         .to_owned();
-    let address = Address::from_str(&address).unwrap().require_network(NETWORK).unwrap();
+    let address = Address::from_str(&address).unwrap().require_network(Network::Regtest).unwrap();
     funder.send_to_address(&address, Amount::ONE_BTC, None, None, None, None, None, None).unwrap();
     mine(&funder, 1);
     assert_eq!(http("GET", &format!("{wallet_url}/balance"), &token)["confirmed_sat"], 100_000_000);
 
     // Send 0.3 BTC: server builds, we review and sign, server broadcasts.
-    let dest = funder.get_new_address(None, None).unwrap().require_network(NETWORK).unwrap();
+    let dest = funder.get_new_address(None, None).unwrap().require_network(Network::Regtest).unwrap();
     let amount = Amount::from_sat(30_000_000);
     let request = PsbtRequest {
         address: dest.to_string(),
@@ -262,7 +262,7 @@ fn random_wallet() -> Wallet {
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
         Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
     let (ext, int) = keys::descriptors(&mnemonic.into_key()).unwrap();
-    Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap()
+    Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap()
 }
 
 /// Registers a second, unrelated wallet and returns its token.

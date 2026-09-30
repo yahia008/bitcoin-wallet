@@ -5,14 +5,19 @@ use bdk_bitcoind_rpc::Emitter;
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, RpcApi};
 pub use bdk_bitcoind_rpc::bitcoincore_rpc::Client;
 use bdk_wallet::PersistedWallet;
+use bdk_wallet::bitcoin::Network;
 use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
 
-/// Connects to Bitcoin Core and checks that it answers.
-pub fn connect(url: &str, user: &str, pass: &str) -> anyhow::Result<Client> {
+/// Connects to Bitcoin Core and checks that it answers and is on `network`.
+pub fn connect(url: &str, user: &str, pass: &str, network: Network) -> anyhow::Result<Client> {
     let client = Client::new(url, Auth::UserPass(user.to_owned(), pass.to_owned()))?;
-    client.get_blockchain_info().with_context(|| {
-        format!("cannot reach Bitcoin Core at {url}; is it running? (docker compose up -d)")
-    })?;
+    let info = client
+        .get_blockchain_info()
+        .with_context(|| format!("cannot reach Bitcoin Core at {url}; is it running?"))?;
+    // Otherwise a testnet4 wallet synced against a regtest node would just look empty.
+    if info.chain != network {
+        bail!("Bitcoin Core at {url} is on {}, but the wallet uses {network}", info.chain);
+    }
     Ok(client)
 }
 

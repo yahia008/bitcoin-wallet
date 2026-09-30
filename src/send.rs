@@ -255,13 +255,13 @@ mod tests {
     use bdk_wallet::bitcoin::{TxIn, TxOut};
 
     use super::*;
-    use crate::NETWORK;
+    use bdk_wallet::bitcoin::Network;
 
     const RECIPIENT: &str = "bcrt1q62sez8m4jmuk0uljr0c27jcl0gjq5rvx9j5nrk";
     const ATTACKER: &str = "bcrt1q995yuvawdx39hdzy6ra64dqxkkw76q7ethjm20";
 
     fn addr(s: &str) -> Address {
-        Address::from_str(s).unwrap().require_network(NETWORK).unwrap()
+        Address::from_str(s).unwrap().require_network(Network::Regtest).unwrap()
     }
 
     /// A wallet holding one unconfirmed 1 BTC coin, and an honest PSBT paying 0.3 BTC.
@@ -272,7 +272,7 @@ mod tests {
         )
         .unwrap();
         let (ext, int) = keys::descriptors(&mnemonic).unwrap();
-        let mut wallet = Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap();
+        let mut wallet = Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
 
         let ours = wallet.reveal_next_address(KeychainKind::External).address;
         let funding = Transaction {

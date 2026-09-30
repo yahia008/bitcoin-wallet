@@ -123,7 +123,7 @@ cargo test -- --ignored           # end-to-end: real server + regtest, full non-
 ## Project layout
 
 ```
-src/lib.rs          shared: NETWORK, load(), wallet_id(), confirmations()
+src/lib.rs          shared: parse_network(), load(), wallet_id(), confirmations()
 src/keys.rs         mnemonic → BIP84 descriptors and keys
 src/secret.rs       encrypted mnemonic storage
 src/chain.rs        Bitcoin Core RPC and sync
