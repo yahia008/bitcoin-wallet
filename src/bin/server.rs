@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bdk_wallet::bitcoin::{Address, Amount, Network, OutPoint, Psbt, Transaction, Txid};
+use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
 use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::bitcoin::hex::DisplayHex;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
@@ -26,10 +27,10 @@ use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use bitcoin_wallet::api::{
-    BroadcastRequest, BroadcastResponse, ErrorBody, PsbtRequest, PsbtResponse, RegisterRequest,
-    RegisterResponse,
+    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ErrorBody, PsbtRequest,
+    PsbtResponse, RegisterRequest, RegisterResponse,
 };
-use bitcoin_wallet::send::{self, BuildError};
+use bitcoin_wallet::send::{self, BuildError, FeePriority};
 use bitcoin_wallet::chain::{self, Backend, BackendError, ChainArgs};
 use bitcoin_wallet::{history, load, wallet_id};
 use chacha20poly1305::aead::Generate;
@@ -205,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{id}/transactions", get(list_transactions))
         .route("/wallets/{id}/transactions/{txid}", get(get_transaction))
         .route("/wallets/{id}/psbt", post(build_psbt))
+        .route("/wallets/{id}/bump", post(bump_fee))
         .route("/wallets/{id}/broadcast", post(broadcast))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(middleware::from_fn_with_state(per_ip, rate_limit))
@@ -480,21 +482,8 @@ async fn build_psbt(
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let now = Instant::now();
         let reserved = w.reserved.active(now);
-        let draft = send::build(&mut w.wallet, &to, amount, fee_rate, &reserved).map_err(|e| {
-            match e {
-                BuildError::Other(e) => ApiError::from(e),
-                // The balance can look big enough while coins sit reserved; say why.
-                e @ BuildError::InsufficientFunds(_) if !reserved.is_empty() => {
-                    ApiError::bad_request(format!(
-                        "{e} ({} coin(s) are reserved by PSBTs not broadcast yet; they free up \
-                         once broadcast or after {} minutes)",
-                        reserved.len(),
-                        RESERVATION_TTL.as_secs() / 60,
-                    ))
-                }
-                e => ApiError::bad_request(e.to_string()),
-            }
-        })?;
+        let draft = send::build(&mut w.wallet, &to, amount, fee_rate, &reserved)
+            .map_err(|e| build_error(e, &reserved))?;
         w.reserved.reserve(spent_coins(&draft.psbt.unsigned_tx), now + RESERVATION_TTL);
         Ok((draft, fee_rate))
     })
@@ -507,6 +496,64 @@ async fn build_psbt(
         change_sat: draft.change.to_sat(),
         fee_rate_sat_vb: fee_rate.to_sat_per_vb_ceil(),
     }))
+}
+
+/// Builds an UNSIGNED replacement for one of the wallet's unconfirmed transactions, paying a
+/// higher fee (RBF). Like /psbt, the client reviews it (against the original, which we send
+/// along), signs it locally and hands it back to /broadcast.
+async fn bump_fee(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    token: Bearer,
+    ApiJson(req): ApiJson<BumpRequest>,
+) -> Result<Json<BumpResponse>, ApiError> {
+    let txid = Txid::from_str(&req.txid).map_err(|_| ApiError::bad_request("invalid txid"))?;
+    let priority = req.fee_priority.unwrap_or(FeePriority::Fast);
+
+    let (draft, fee_rate, original) = with_wallet(state, id, token, move |w, backend| {
+        let fee_rate =
+            send::choose_bump_fee_rate(backend, &w.wallet, txid, req.fee_rate_sat_vb, priority)
+                .map_err(|e| build_error(e, &[]))?;
+        let original = w
+            .wallet
+            .get_tx(txid)
+            .ok_or_else(|| ApiError::bad_request("transaction not found in this wallet"))?
+            .tx_node
+            .tx;
+        let now = Instant::now();
+        let reserved = w.reserved.active(now);
+        let draft = send::bump(&mut w.wallet, txid, fee_rate, &reserved)
+            .map_err(|e| build_error(e, &reserved))?;
+        // Only coins the bump added need reserving; the original's are already spent.
+        w.reserved.reserve(spent_coins(&draft.psbt.unsigned_tx), now + RESERVATION_TTL);
+        Ok((draft, fee_rate, original))
+    })
+    .await?;
+
+    Ok(Json(BumpResponse {
+        psbt: draft.psbt.to_string(),
+        original_tx: serialize_hex(original.as_ref()),
+        fee_sat: draft.fee.to_sat(),
+        fee_rate_sat_vb: fee_rate.to_sat_per_vb_ceil(),
+    }))
+}
+
+/// Maps a failure to build a transaction to an HTTP error. Everything but `Other` is the
+/// client's problem (400).
+fn build_error(e: BuildError, reserved: &[OutPoint]) -> ApiError {
+    match e {
+        BuildError::Other(e) => ApiError::from(e),
+        // The balance can look big enough while coins sit reserved; say why.
+        e @ BuildError::InsufficientFunds(_) if !reserved.is_empty() => {
+            ApiError::bad_request(format!(
+                "{e} ({} coin(s) are reserved by PSBTs not broadcast yet; they free up once \
+                 broadcast or after {} minutes)",
+                reserved.len(),
+                RESERVATION_TTL.as_secs() / 60,
+            ))
+        }
+        e => ApiError::bad_request(e.to_string()),
+    }
 }
 
 /// Finalizes a PSBT the client signed and broadcasts it. Finalizing needs only the public

@@ -50,6 +50,32 @@ pub struct PsbtResponse {
     pub fee_rate_sat_vb: u64,
 }
 
+/// Asks for a fee bump (RBF replacement) of one of the wallet's unconfirmed transactions.
+#[derive(Serialize, Deserialize)]
+pub struct BumpRequest {
+    pub txid: String,
+    /// An exact fee rate. Omit to let the server estimate one for `fee_priority`; either way
+    /// it's at least the original's rate + 1 sat/vB.
+    #[serde(default)]
+    pub fee_rate_sat_vb: Option<u64>,
+    /// Defaults to `fast`: you bump because you want it confirmed sooner.
+    #[serde(default)]
+    pub fee_priority: Option<FeePriority>,
+}
+
+/// An unsigned replacement PSBT, plus the original transaction so the signer can check the
+/// replacement against it (`send::review_bump`) without trusting the server: its txid must
+/// match the one requested.
+#[derive(Serialize, Deserialize)]
+pub struct BumpResponse {
+    /// Base64-encoded unsigned PSBT
+    pub psbt: String,
+    /// The transaction being replaced, consensus-encoded hex
+    pub original_tx: String,
+    pub fee_sat: u64,
+    pub fee_rate_sat_vb: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct BroadcastRequest {
     /// Base64-encoded signed PSBT

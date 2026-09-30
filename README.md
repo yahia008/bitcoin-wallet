@@ -57,6 +57,7 @@ cargo run -- status <txid> --watch
 | `balance` | no | Confirmed / unconfirmed / immature balance |
 | `history` | no | Transactions, newest first |
 | `send ADDRESS BTC [--server URL]` | yes | Build, review, sign and broadcast |
+| `bump TXID [--fee-rate N \| --fee P] [--server URL]` | yes | Replace an unconfirmed transaction with a higher-fee copy (RBF). Payments stay the same; the extra fee comes from change. Defaults to the `fast` estimate, and never less than the old rate + 1 sat/vB |
 | `status TXID [--watch --until N]` | no | Confirmation status, or poll until N confirmations |
 
 Global options (each can also be set with the environment variable in brackets):
@@ -95,6 +96,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | GET | `/wallets/{id}/transactions` | | `[{txid, net_sat, fee_sat, confirmed, confirmations, block_height}]` |
 | GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations) |
 | POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?, fee_priority?}` | unsigned PSBT (base64) + summary. `fee_priority` is `fast`, `normal` (default) or `slow`; an exact `fee_rate_sat_vb` overrides it |
+| POST | `/wallets/{id}/bump` | `{txid, fee_rate_sat_vb?, fee_priority?}` | unsigned replacement PSBT (RBF) + `original_tx` (hex). `fee_priority` defaults to `fast` |
 | POST | `/wallets/{id}/broadcast` | `{psbt}` signed PSBT (base64) | `{txid}` |
 
 - **Auth:** every `/wallets/{id}/...` request needs `Authorization: Bearer <token>`. The token is returned once, at registration; the server stores only its SHA-256 hash.
@@ -124,6 +126,7 @@ CLI (your machine)                         API server (watch-only)          Core
 
 - **The server stores public descriptors only.** It rejects any descriptor containing a private key. If the server is compromised, an attacker can see balances but can't spend.
 - **The CLI verifies every server-built PSBT before signing** (`send::review`). The recipient must get exactly the requested amount, and every other output must be the wallet's own change: the CLI derives the change script itself and compares. Input values are checked against the previous transactions' hashes, so a faked input value can't hide a large fee. Only `SIGHASH_ALL` is accepted.
+- **Fee bumps are verified too** (`send::review_bump`). The server sends the original transaction, and the CLI checks its txid matches the one it asked to bump. The replacement must spend every coin the original spent, pay every payment exactly as before, send everything else to your own change, and pay a higher fee. A server can't use a "fee bump" to redirect a payment.
 - **On disk,** `wallet.sqlite` holds only the account key (`[fingerprint/84'/1'/0']tprv…`), encrypted with your password. It's decrypted only while signing, and the database otherwise holds only public data. The mnemonic itself is never stored, so a leaked file plus password exposes this one account, not everything the seed controls; your written-down words are the only copy. Wallets created before this stored the mnemonic; the first `send` upgrades them to the account key.
 - **Per-wallet API tokens.** Without its token nobody can read a wallet, reveal addresses or build PSBTs (which would reserve its coins). Registering is one-shot, since descriptors aren't secret: a second registration gets `409`, never the token. A lost token can't be recovered yet; the server admin has to delete the wallet from `--data-dir` so it can be registered again. Wallets registered before tokens existed must be re-registered the same way.
 - **Rate limits per IP** stop registration spam (each registration creates a database file) and request floods (each request syncs with Core). They're in memory and use the connecting IP, so behind a reverse proxy they'd need to read `X-Forwarded-For` instead.

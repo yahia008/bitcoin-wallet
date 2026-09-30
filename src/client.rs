@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::api::{
-    BroadcastRequest, BroadcastResponse, ErrorBody, PsbtRequest, PsbtResponse, RegisterRequest,
-    RegisterResponse,
+    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ErrorBody, PsbtRequest,
+    PsbtResponse, RegisterRequest, RegisterResponse,
 };
 
 /// The server answered with an error status. Callers can downcast to this to react to
@@ -57,6 +57,10 @@ impl ApiClient {
 
     pub fn build_psbt(&self, id: &str, request: &PsbtRequest) -> anyhow::Result<PsbtResponse> {
         self.post(&format!("/wallets/{id}/psbt"), request)
+    }
+
+    pub fn bump(&self, id: &str, request: &BumpRequest) -> anyhow::Result<BumpResponse> {
+        self.post(&format!("/wallets/{id}/bump"), request)
     }
 
     pub fn broadcast(

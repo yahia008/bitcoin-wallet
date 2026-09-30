@@ -6,6 +6,7 @@
 //! Only `sign` touches private keys, so the API server can do everything else while the
 //! signing stays on the user's device.
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -13,9 +14,10 @@ use bdk_wallet::bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv
 use bdk_wallet::bitcoin::psbt::{GetKey, GetKeyError, KeyRequest};
 use bdk_wallet::bitcoin::secp256k1::{Secp256k1, Signing};
 use bdk_wallet::bitcoin::{
-    Address, Amount, EcdsaSighashType, FeeRate, OutPoint, PrivateKey, Psbt, Transaction, Txid,
+    Address, Amount, EcdsaSighashType, FeeRate, OutPoint, PrivateKey, Psbt, Transaction, TxOut,
+    Txid,
 };
-use bdk_wallet::error::CreateTxError;
+use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Wallet};
 
@@ -119,11 +121,15 @@ pub struct Draft {
     pub inputs: usize,
 }
 
-/// Why a transaction couldn't be built. The first two are the caller's problem (HTTP 400).
+/// Why a transaction couldn't be built. All but `Other` are the caller's problem (HTTP 400).
 #[derive(Debug)]
 pub enum BuildError {
     InsufficientFunds(String),
     BelowDust,
+    /// The transaction can't be fee-bumped: unknown, already confirmed, or not replaceable.
+    CannotBump(String),
+    /// A replacement must pay more than the original, by at least the node's relay fee.
+    FeeTooLow(String),
     Other(anyhow::Error),
 }
 
@@ -132,6 +138,8 @@ impl std::fmt::Display for BuildError {
         match self {
             BuildError::InsufficientFunds(e) => write!(f, "insufficient funds: {e}"),
             BuildError::BelowDust => write!(f, "amount is below the dust limit; send more"),
+            BuildError::CannotBump(e) => write!(f, "can't bump this transaction: {e}"),
+            BuildError::FeeTooLow(e) => write!(f, "fee rate too low for a replacement: {e}"),
             BuildError::Other(e) => write!(f, "building transaction: {e:#}"),
         }
     }
@@ -154,12 +162,77 @@ pub fn build(
         .add_recipient(to.script_pubkey(), amount)
         .fee_rate(fee_rate)
         .unspendable(unspendable.to_vec());
-    let psbt = builder.finish().map_err(|e| match e {
-        CreateTxError::CoinSelection(e) => BuildError::InsufficientFunds(e.to_string()),
-        CreateTxError::OutputBelowDustLimit(_) => BuildError::BelowDust,
+    let psbt = builder.finish().map_err(build_error)?;
+    draft(wallet, psbt)
+}
+
+/// Builds an unsigned replacement for our unconfirmed transaction `txid` (RBF): the same
+/// coins and payments, a higher `fee_rate`, the extra fee taken from our change (or from
+/// more coins if the change can't cover it). Coins in `unspendable` are never added.
+pub fn bump(
+    wallet: &mut Wallet,
+    txid: Txid,
+    fee_rate: FeeRate,
+    unspendable: &[OutPoint],
+) -> Result<Draft, BuildError> {
+    let mut builder = wallet.build_fee_bump(txid).map_err(|e| match e {
+        BuildFeeBumpError::TransactionNotFound(_)
+        | BuildFeeBumpError::TransactionConfirmed(_)
+        | BuildFeeBumpError::IrreplaceableTransaction(_) => BuildError::CannotBump(e.to_string()),
         e => BuildError::Other(e.into()),
     })?;
+    builder.fee_rate(fee_rate).unspendable(unspendable.to_vec());
+    let psbt = builder.finish().map_err(build_error)?;
+    draft(wallet, psbt)
+}
 
+/// The fee rate for bumping `txid`: exactly `requested` if given (the builder rejects it if
+/// it's too low), else the estimate for `priority`, but never less than the original's rate
+/// plus 1 sat/vB, the least a replacement can add and still be relayed.
+pub fn choose_bump_fee_rate(
+    backend: &Backend,
+    wallet: &Wallet,
+    txid: Txid,
+    requested_sat_vb: Option<u64>,
+    priority: FeePriority,
+) -> Result<FeeRate, BuildError> {
+    if let Some(rate) = requested_sat_vb {
+        return FeeRate::from_sat_per_vb(rate)
+            .ok_or_else(|| BuildError::FeeTooLow("fee rate too large".to_owned()));
+    }
+    let original = wallet
+        .get_tx(txid)
+        .ok_or_else(|| BuildError::CannotBump(format!("transaction {txid} is not in this wallet")))?
+        .tx_node
+        .tx;
+    let fee = wallet
+        .calculate_fee(&original)
+        .map_err(|e| BuildError::Other(anyhow!("computing the original's fee: {e}")))?;
+    // Round the original rate up, so "+1 sat/vB" really is at least 1 more.
+    let original_rate =
+        FeeRate::from_sat_per_kwu((fee.to_sat() * 1000).div_ceil(original.weight().to_wu()));
+    let floor = FeeRate::from_sat_per_kwu(
+        original_rate.to_sat_per_kwu() + FeeRate::BROADCAST_MIN.to_sat_per_kwu(),
+    );
+    Ok(backend
+        .estimate_fee_rate(priority.target_blocks())
+        .map_or(floor, |estimate| estimate.max(floor)))
+}
+
+fn build_error(e: CreateTxError) -> BuildError {
+    match e {
+        CreateTxError::CoinSelection(e) => BuildError::InsufficientFunds(e.to_string()),
+        CreateTxError::OutputBelowDustLimit(_) => BuildError::BelowDust,
+        e @ (CreateTxError::FeeTooLow { .. } | CreateTxError::FeeRateTooLow { .. }) => {
+            BuildError::FeeTooLow(e.to_string())
+        }
+        e => BuildError::Other(e.into()),
+    }
+}
+
+/// Works out the numbers a user checks before signing: fee, and change (outputs paying our
+/// internal keychain).
+fn draft(wallet: &Wallet, psbt: Psbt) -> Result<Draft, BuildError> {
     let fee = psbt.fee().map_err(|e| BuildError::Other(e.into()))?;
     // Change = outputs paying our internal (change) keychain.
     let change = psbt
@@ -193,12 +266,64 @@ pub struct Review {
 /// the change script ourselves and compare), and the fee is computed from input values we
 /// verify against the previous transactions' hashes.
 pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> anyhow::Result<Review> {
+    let payment = TxOut { value: amount, script_pubkey: to.script_pubkey() };
+    let inputs = verified_inputs(psbt)?;
+    let change = check_outputs(wallet, psbt, &[payment])?;
+    Ok(Review { fee: fee_of(&psbt.unsigned_tx, &inputs)?, change, inputs: inputs.len() })
+}
+
+/// Checks a fee bump (RBF replacement) of `original` that someone else built. Besides the
+/// usual checks, the replacement must:
+/// - spend every coin the original spent, so it really replaces it (and we know what the
+///   original paid in fees, from input values verified the same way);
+/// - pay every payment of the original exactly as before: only our change may shrink;
+/// - pay a higher fee than the original.
+///
+/// Returns the review and the original's fee.
+pub fn review_bump(
+    wallet: &Wallet,
+    psbt: &Psbt,
+    original: &Transaction,
+) -> anyhow::Result<(Review, Amount)> {
+    let inputs = verified_inputs(psbt)?;
+    for txin in &original.input {
+        if !inputs.contains_key(&txin.previous_output) {
+            bail!(
+                "the replacement doesn't spend {}, so it doesn't replace the original",
+                txin.previous_output
+            );
+        }
+    }
+    // The original's payments are its outputs that aren't our change.
+    let payments: Vec<TxOut> = original
+        .output
+        .iter()
+        .filter(|out| {
+            !matches!(
+                wallet.derivation_of_spk(out.script_pubkey.clone()),
+                Some((KeychainKind::Internal, _))
+            )
+        })
+        .cloned()
+        .collect();
+    let change = check_outputs(wallet, psbt, &payments)?;
+
+    let fee = fee_of(&psbt.unsigned_tx, &inputs)?;
+    let old_fee = fee_of(original, &inputs)?;
+    if fee <= old_fee {
+        bail!("the replacement's fee {fee} isn't higher than the original's {old_fee}");
+    }
+    Ok((Review { fee, change, inputs: inputs.len() }, old_fee))
+}
+
+/// The value of every coin the PSBT spends, checked against the previous transactions.
+fn verified_inputs(psbt: &Psbt) -> anyhow::Result<HashMap<OutPoint, Amount>> {
     let tx = &psbt.unsigned_tx;
     if tx.input.len() != psbt.inputs.len() || tx.output.len() != psbt.outputs.len() {
         bail!("malformed PSBT");
     }
 
-    let mut input_total = Amount::ZERO;
+    let mut values = HashMap::new();
     for (i, (txin, input)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
         // SIGHASH_ALL commits to all inputs and outputs. Anything weaker (NONE, SINGLE,
         // ANYONECANPAY) would let someone change the transaction after we sign it.
@@ -223,18 +348,30 @@ pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> any
         if input.witness_utxo.as_ref().is_some_and(|w| w != spent) {
             bail!("input {i}: witness_utxo disagrees with the previous transaction");
         }
-        input_total += spent.value;
+        values.insert(txin.previous_output, spent.value);
     }
+    Ok(values)
+}
 
-    let recipient = to.script_pubkey();
+/// Requires the PSBT to pay each of `payments` exactly, with every other output going to our
+/// own change. Returns the change total.
+fn check_outputs(wallet: &Wallet, psbt: &Psbt, payments: &[TxOut]) -> anyhow::Result<Amount> {
+    let mut unpaid: Vec<&TxOut> = payments.iter().collect();
     let change_descriptor = wallet.public_descriptor(KeychainKind::Internal);
-    let (mut paid, mut change) = (Amount::ZERO, Amount::ZERO);
-    for (i, (txout, output)) in tx.output.iter().zip(&psbt.outputs).enumerate() {
-        if txout.script_pubkey == recipient {
-            paid += txout.value;
+    let mut change = Amount::ZERO;
+    for (i, (txout, output)) in psbt.unsigned_tx.output.iter().zip(&psbt.outputs).enumerate() {
+        if let Some(pos) = unpaid.iter().position(|p| p.script_pubkey == txout.script_pubkey) {
+            let payment = unpaid.remove(pos);
+            if txout.value != payment.value {
+                bail!(
+                    "PSBT pays {} to the recipient, but you asked for {}",
+                    txout.value,
+                    payment.value
+                );
+            }
             continue;
         }
-        // Not the recipient, so it must be our change. The PSBT says which change index it is;
+        // Not a payment, so it must be our change. The PSBT says which change index it is;
         // derive that script from our own descriptor and require an exact match.
         let index = output
             .bip32_derivation
@@ -250,15 +387,24 @@ pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> any
         }
         change += txout.value;
     }
-    if paid != amount {
-        bail!("PSBT pays {paid} to the recipient, but you asked for {amount}");
+    if let Some(missing) = unpaid.first() {
+        bail!("PSBT is missing the payment of {} to {}", missing.value, missing.script_pubkey);
     }
+    Ok(change)
+}
 
+/// Inputs minus outputs, with input values from `values` (already verified).
+fn fee_of(tx: &Transaction, values: &HashMap<OutPoint, Amount>) -> anyhow::Result<Amount> {
+    let mut input_total = Amount::ZERO;
+    for txin in &tx.input {
+        input_total += *values
+            .get(&txin.previous_output)
+            .ok_or_else(|| anyhow!("no verified value for input {}", txin.previous_output))?;
+    }
     let output_total: Amount = tx.output.iter().map(|o| o.value).sum();
-    let fee = input_total
+    input_total
         .checked_sub(output_total)
-        .ok_or_else(|| anyhow!("PSBT outputs exceed its inputs"))?;
-    Ok(Review { fee, change, inputs: tx.input.len() })
+        .ok_or_else(|| anyhow!("outputs exceed inputs"))
 }
 
 /// Checks that `account_key` really belongs to `wallet`: its public descriptors must match
@@ -515,6 +661,79 @@ mod tests {
         let (wallet, mut psbt) = setup();
         psbt.inputs[0].non_witness_utxo = None;
         assert!(check(&wallet, &psbt).is_err());
+    }
+
+    /// `setup`'s payment signed and in the wallet as unconfirmed, plus an honest bump of it
+    /// to 5 sat/vB.
+    fn setup_bump() -> (Wallet, Transaction, Psbt) {
+        let (mut wallet, mut psbt) = setup();
+        sign(&wallet, &account_key(), &mut psbt).unwrap();
+        let original = finalize(&wallet, psbt).unwrap();
+        wallet.apply_unconfirmed_txs([(original.clone(), 1)]);
+        let rate = FeeRate::from_sat_per_vb(5).unwrap();
+        let draft = bump(&mut wallet, original.compute_txid(), rate, &[]).unwrap();
+        (wallet, original, draft.psbt)
+    }
+
+    #[test]
+    fn honest_bump_passes_and_signs() {
+        let (wallet, original, mut psbt) = setup_bump();
+        let (review, old_fee) = review_bump(&wallet, &psbt, &original).unwrap();
+        assert_eq!(old_fee, wallet.calculate_fee(&original).unwrap());
+        assert!(review.fee > old_fee);
+        // Same payment; the extra fee came out of the change.
+        let old_change = original.output.iter().map(|o| o.value).sum::<Amount>()
+            - Amount::from_sat(30_000_000);
+        assert_eq!(review.change + (review.fee - old_fee), old_change);
+        sign(&wallet, &account_key(), &mut psbt).unwrap();
+        finalize(&wallet, psbt).unwrap();
+    }
+
+    #[test]
+    fn bump_rejects_changed_payment() {
+        let (wallet, original, mut psbt) = setup_bump();
+        let i = recipient_output(&psbt);
+        psbt.unsigned_tx.output[i].value = Amount::from_sat(20_000_000);
+        assert!(review_bump(&wallet, &psbt, &original).is_err());
+    }
+
+    #[test]
+    fn bump_rejects_redirected_payment() {
+        let (wallet, original, mut psbt) = setup_bump();
+        let i = recipient_output(&psbt);
+        psbt.unsigned_tx.output[i].script_pubkey = addr(ATTACKER).script_pubkey();
+        assert!(review_bump(&wallet, &psbt, &original).is_err());
+    }
+
+    #[test]
+    fn bump_rejects_unrelated_transaction() {
+        // A fresh payment instead of a replacement: it doesn't spend the original's coins.
+        let (wallet, original, _) = setup_bump();
+        let (_, other) = setup();
+        let other_tx = Transaction { input: vec![], ..other.unsigned_tx.clone() };
+        let mut fake = other.clone();
+        fake.unsigned_tx = other_tx;
+        fake.inputs.clear();
+        assert!(review_bump(&wallet, &fake, &original).is_err());
+    }
+
+    #[test]
+    fn bump_rejects_same_fee() {
+        // The original itself, offered as its own "replacement".
+        let (wallet, psbt) = setup();
+        let mut signed = psbt.clone();
+        sign(&wallet, &account_key(), &mut signed).unwrap();
+        let original = finalize(&wallet, signed).unwrap();
+        let err = review_bump(&wallet, &psbt, &original).err().unwrap().to_string();
+        assert!(err.contains("isn't higher"), "{err}");
+    }
+
+    #[test]
+    fn cannot_bump_unknown_transaction() {
+        let (mut wallet, _) = setup();
+        let rate = FeeRate::from_sat_per_vb(5).unwrap();
+        let err = bump(&mut wallet, Txid::all_zeros(), rate, &[]).err().unwrap();
+        assert!(matches!(err, BuildError::CannotBump(_)), "{err}");
     }
 
     fn recipient_output(psbt: &Psbt) -> usize {

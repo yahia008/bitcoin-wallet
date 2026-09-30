@@ -4,13 +4,14 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, Denomination, Network, Psbt, Txid};
+use bdk_wallet::bitcoin::consensus::encode::deserialize_hex;
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, Network, Psbt, Transaction, Txid};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
-use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
+use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
+use bitcoin_wallet::api::{BroadcastRequest, BumpRequest, PsbtRequest, RegisterRequest};
 use bitcoin_wallet::client::{self, ApiClient, ApiError};
 use bitcoin_wallet::chain::{self, ChainArgs};
 use bitcoin_wallet::send::FeePriority;
@@ -75,6 +76,17 @@ enum Command {
         #[arg(long, env = "WALLET_API")]
         server: Option<String>,
     },
+    /// Replace an unconfirmed transaction with one paying a higher fee (RBF). The payments
+    /// stay the same; the extra fee comes out of your change.
+    Bump {
+        /// Transaction id of your unconfirmed transaction
+        txid: String,
+        #[command(flatten)]
+        options: SendOptions,
+        /// Let this API server build and broadcast the replacement; we only review and sign.
+        #[arg(long, env = "WALLET_API")]
+        server: Option<String>,
+    },
     /// Show a transaction's confirmation status
     Status {
         /// Transaction id
@@ -97,8 +109,9 @@ struct SendOptions {
     #[arg(long, conflicts_with = "fee")]
     fee_rate: Option<u64>,
     /// How soon to confirm; the backend estimates a fee rate for it
-    #[arg(long, value_enum, default_value_t = FeePriority::Normal)]
-    fee: FeePriority,
+    /// [default: normal for send, fast for bump]
+    #[arg(long, value_enum)]
+    fee: Option<FeePriority>,
     /// Skip the confirmation prompt
     #[arg(long)]
     yes: bool,
@@ -125,6 +138,13 @@ fn main() -> anyhow::Result<()> {
             match server {
                 Some(server) => send_via_server(&cli, server, &to, amount, options),
                 None => send_local(&cli, &to, amount, options),
+            }
+        }
+        Command::Bump { ref txid, ref options, ref server } => {
+            let txid = Txid::from_str(txid).context("invalid txid")?;
+            match server {
+                Some(server) => bump_via_server(&cli, server, txid, options),
+                None => bump_local(&cli, txid, options),
             }
         }
         Command::Status { ref txid, watch, until, interval } => {
@@ -354,7 +374,8 @@ fn send_local(
     let backend = cli.chain.connect()?;
     chain::sync(&mut wallet, &mut conn, &backend)?;
 
-    let fee_rate = send::choose_fee_rate(&backend, options.fee_rate, options.fee)?;
+    let priority = options.fee.unwrap_or(FeePriority::Normal);
+    let fee_rate = send::choose_fee_rate(&backend, options.fee_rate, priority)?;
     let draft = send::build(&mut wallet, to, amount, fee_rate, &[])?;
     print_summary(to, amount, draft.fee, draft.change, &draft.psbt);
     // Returning here or below without persisting also discards the change address the
@@ -386,27 +407,15 @@ fn send_via_server(
     amount: Amount,
     options: &SendOptions,
 ) -> anyhow::Result<()> {
-    let (conn, wallet) = load(&cli.db, cli.chain.network)?;
-    let token = client::load_token(&conn, server)?.with_context(|| {
-        format!("this wallet isn't registered with {server}; run `register --server {server}` first")
-    })?;
-    let api = ApiClient::new(server).with_token(token);
-    let id = wallet_id(
-        &wallet.public_descriptor(KeychainKind::External).to_string(),
-        &wallet.public_descriptor(KeychainKind::Internal).to_string(),
-    );
+    let (conn, wallet, api, id) = api_session(cli, server)?;
 
     let request = PsbtRequest {
         address: to.to_string(),
         amount_sat: amount.to_sat(),
         fee_rate_sat_vb: options.fee_rate,
-        fee_priority: options.fee,
+        fee_priority: options.fee.unwrap_or(FeePriority::Normal),
     };
-    let response = api.build_psbt(&id, &request).map_err(|e| match status_of(&e) {
-        Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
-        Some(401) => e.context("the server rejected this wallet's API token"),
-        _ => e,
-    })?;
+    let response = api.build_psbt(&id, &request).map_err(explain_api_error)?;
     let mut psbt = Psbt::from_str(&response.psbt).context("server returned an invalid PSBT")?;
 
     // Don't trust the server's summary: work out what the PSBT really does and refuse
@@ -428,6 +437,134 @@ fn send_via_server(
     println!("Broadcast: {}", response.txid);
     println!("Status: unconfirmed. {}", confirm_hint(cli.chain.network));
     Ok(())
+}
+
+/// Loads the wallet and an API client authenticated for it on `server`.
+fn api_session(
+    cli: &Cli,
+    server: &str,
+) -> anyhow::Result<(Connection, PersistedWallet<Connection>, ApiClient, String)> {
+    let (conn, wallet) = load(&cli.db, cli.chain.network)?;
+    let token = client::load_token(&conn, server)?.with_context(|| {
+        format!("this wallet isn't registered with {server}; run `register --server {server}` first")
+    })?;
+    let api = ApiClient::new(server).with_token(token);
+    let id = wallet_id(
+        &wallet.public_descriptor(KeychainKind::External).to_string(),
+        &wallet.public_descriptor(KeychainKind::Internal).to_string(),
+    );
+    Ok((conn, wallet, api, id))
+}
+
+fn explain_api_error(e: anyhow::Error) -> anyhow::Error {
+    match status_of(&e) {
+        Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
+        Some(401) => e.context("the server rejected this wallet's API token"),
+        _ => e,
+    }
+}
+
+/// Replaces our unconfirmed `txid` with a higher-fee copy (RBF), built locally.
+fn bump_local(cli: &Cli, txid: Txid, options: &SendOptions) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    let backend = cli.chain.connect()?;
+    chain::sync(&mut wallet, &mut conn, &backend)?;
+
+    let priority = options.fee.unwrap_or(FeePriority::Fast);
+    let fee_rate =
+        send::choose_bump_fee_rate(&backend, &wallet, txid, options.fee_rate, priority)?;
+    let original = wallet
+        .get_tx(txid)
+        .with_context(|| format!("transaction {txid} is not in this wallet"))?
+        .tx_node
+        .tx;
+    let draft = send::bump(&mut wallet, txid, fee_rate, &[])?;
+    // We built it ourselves, but the same checks give us the numbers to show.
+    let (review, old_fee) = send::review_bump(&wallet, &draft.psbt, &original)?;
+    print_bump_summary(&original, old_fee, review.fee, review.change, &draft.psbt);
+    check_fee(&draft.psbt, paid(&draft.psbt, review.change), review.fee, options)?;
+
+    if !options.yes && !confirm("Sign and broadcast the replacement?")? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let account_key = unlock(&conn, &wallet)?;
+    let mut psbt = draft.psbt;
+    send::sign(&wallet, &account_key, &mut psbt)?;
+    let tx = send::finalize(&wallet, psbt)?;
+    let new_txid = send::broadcast(&mut wallet, &mut conn, &backend, tx)?;
+    println!("Broadcast: {new_txid} (replaces {txid})");
+    println!("Status: unconfirmed. {}", confirm_hint(cli.chain.network));
+    Ok(())
+}
+
+/// The API flow for bump: the server builds the replacement, we check it against the
+/// original (which the server sends, and whose txid we verify), then sign locally.
+fn bump_via_server(
+    cli: &Cli,
+    server: &str,
+    txid: Txid,
+    options: &SendOptions,
+) -> anyhow::Result<()> {
+    let (conn, wallet, api, id) = api_session(cli, server)?;
+    let request = BumpRequest {
+        txid: txid.to_string(),
+        fee_rate_sat_vb: options.fee_rate,
+        fee_priority: options.fee,
+    };
+    let response = api.bump(&id, &request).map_err(explain_api_error)?;
+
+    // The txid is a hash of the transaction, so a matching txid means the server sent the
+    // real original, not a doctored one that would make a malicious "bump" look harmless.
+    let original: Transaction = deserialize_hex(&response.original_tx)
+        .context("server returned an invalid original transaction")?;
+    if original.compute_txid() != txid {
+        bail!("server returned a different transaction than {txid}");
+    }
+    let mut psbt = Psbt::from_str(&response.psbt).context("server returned an invalid PSBT")?;
+    let (review, old_fee) =
+        send::review_bump(&wallet, &psbt, &original).context("refusing to sign")?;
+    println!("Verified the server's replacement: same payments, only the fee and change differ.");
+    print_bump_summary(&original, old_fee, review.fee, review.change, &psbt);
+    check_fee(&psbt, paid(&psbt, review.change), review.fee, options)?;
+
+    if !options.yes && !confirm("Sign and send the replacement to the server for broadcast?")? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let account_key = unlock(&conn, &wallet)?;
+    send::sign(&wallet, &account_key, &mut psbt)?;
+    let response = api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() })?;
+    println!("Broadcast: {} (replaces {txid})", response.txid);
+    println!("Status: unconfirmed. {}", confirm_hint(cli.chain.network));
+    Ok(())
+}
+
+/// What a PSBT pays to others: everything but our change and the fee.
+fn paid(psbt: &Psbt, change: Amount) -> Amount {
+    psbt.unsigned_tx.output.iter().map(|o| o.value).sum::<Amount>() - change
+}
+
+fn print_bump_summary(
+    original: &Transaction,
+    old_fee: Amount,
+    fee: Amount,
+    change: Amount,
+    psbt: &Psbt,
+) {
+    // The original is signed, so its size is exact.
+    let old_rate = old_fee.to_sat() as f64 / original.vsize() as f64;
+    let rate = send::signed_fee_rate(&psbt.unsigned_tx, fee);
+    println!();
+    println!("  Replacing: {}", original.compute_txid());
+    println!("  Payments:  {} (unchanged)", paid(psbt, change));
+    println!("  Old fee:   {old_fee} (~{old_rate:.1} sat/vB)");
+    println!("  New fee:   {fee} (~{rate:.1} sat/vB)");
+    println!("  Change:    {change}");
+    println!("  Inputs:    {}", psbt.inputs.len());
+    println!();
 }
 
 /// Everything here comes from the PSBT itself (or our own review of it), not from the server.
