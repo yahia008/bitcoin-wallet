@@ -2,7 +2,7 @@
 //! private keys: clients register public descriptors only, and signing stays with the client.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, FromRequestParts, Path, State};
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
 use axum::http::request::Parts;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -57,6 +58,14 @@ struct Args {
     /// Bitcoin Core RPC password
     #[arg(long, env = "RPC_PASS", default_value = "wallet", hide_default_value = true)]
     rpc_pass: String,
+
+    /// Requests per minute allowed from one IP, across all endpoints
+    #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 60)]
+    rate_limit_per_minute: u32,
+
+    /// Registrations per hour allowed from one IP. Each one creates a database file.
+    #[arg(long, env = "REGISTER_LIMIT_PER_HOUR", default_value_t = 5)]
+    register_limit_per_hour: u32,
 }
 
 /// How long coins picked for a PSBT stay reserved if the client never broadcasts it.
@@ -98,6 +107,68 @@ impl Reservations {
     }
 }
 
+/// Counts requests per client IP in fixed time windows: at most `limit` requests per `window`,
+/// then 429 until the window ends. Kept in memory; a restart just resets the counts.
+///
+/// Behind a reverse proxy every request would come from the proxy's IP, so this would need
+/// to read `X-Forwarded-For` instead. The server only listens on localhost for now.
+struct RateLimiter {
+    limit: u32,
+    window: Duration,
+    /// Per IP: when its current window started, and requests made in it.
+    clients: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+}
+
+impl RateLimiter {
+    /// Above this many tracked IPs, forget the ones whose window already ended.
+    const PRUNE_AT: usize = 10_000;
+
+    fn new(limit: u32, window: Duration) -> Self {
+        RateLimiter { limit, window, clients: Mutex::new(HashMap::new()) }
+    }
+
+    /// Counts one request from `ip`. `Err` holds how long until it may try again.
+    fn check(&self, ip: IpAddr, now: Instant) -> Result<(), Duration> {
+        // A panic elsewhere can't leave this map inconsistent, so a poisoned lock is fine.
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if clients.len() >= Self::PRUNE_AT {
+            clients.retain(|_, (start, _)| now < *start + self.window);
+        }
+
+        let (start, count) = clients.entry(ip).or_insert((now, 0));
+        if now >= *start + self.window {
+            (*start, *count) = (now, 0);
+        }
+        if *count >= self.limit {
+            return Err(*start + self.window - now);
+        }
+        *count += 1;
+        Ok(())
+    }
+}
+
+/// Middleware: rejects the request with 429 and `Retry-After` once its IP is over the limit.
+async fn rate_limit(
+    State(limiter): State<Arc<RateLimiter>>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match limiter.check(client.ip(), Instant::now()) {
+        Ok(()) => next.run(request).await,
+        Err(wait) => {
+            let seconds = wait.as_secs_f64().ceil().max(1.0) as u64;
+            let mut response = ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: format!("too many requests; try again in {seconds} s"),
+            }
+            .into_response();
+            response.headers_mut().insert(RETRY_AFTER, seconds.into());
+            response
+        }
+    }
+}
+
 /// The coins a transaction spends.
 fn spent_coins(tx: &Transaction) -> impl Iterator<Item = OutPoint> + '_ {
     tx.input.iter().map(|input| input.previous_output)
@@ -125,9 +196,16 @@ async fn main() -> anyhow::Result<()> {
         wallets: Mutex::new(HashMap::new()),
     });
 
+    let per_ip = Arc::new(RateLimiter::new(args.rate_limit_per_minute, Duration::from_secs(60)));
+    let registrations =
+        Arc::new(RateLimiter::new(args.register_limit_per_hour, Duration::from_secs(60 * 60)));
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/wallets", post(register_wallet))
+        .route(
+            "/wallets",
+            post(register_wallet).layer(middleware::from_fn_with_state(registrations, rate_limit)),
+        )
         .route("/wallets/{id}/balance", get(balance))
         .route("/wallets/{id}/addresses", get(list_addresses).post(new_address))
         .route("/wallets/{id}/transactions", get(list_transactions))
@@ -135,11 +213,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{id}/psbt", post(build_psbt))
         .route("/wallets/{id}/broadcast", post(broadcast))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
+        .layer(middleware::from_fn_with_state(per_ip, rate_limit))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     println!("Listening on http://{}", args.listen);
-    axum::serve(listener, app)
+    // connect_info lets handlers and middleware see the caller's address (for rate limiting).
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -649,6 +729,20 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(token_hash(&a), token_hash(&a));
         assert_ne!(token_hash(&a), token_hash(&b));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_until_window_ends() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let (me, other) = (IpAddr::from([127, 0, 0, 1]), IpAddr::from([10, 0, 0, 1]));
+        let t0 = Instant::now();
+
+        assert!(limiter.check(me, t0).is_ok());
+        assert!(limiter.check(me, t0).is_ok());
+        let wait = limiter.check(me, t0 + Duration::from_secs(20)).unwrap_err();
+        assert_eq!(wait, Duration::from_secs(40), "blocked until the window ends");
+        assert!(limiter.check(other, t0).is_ok(), "limits are per IP");
+        assert!(limiter.check(me, t0 + Duration::from_secs(60)).is_ok(), "new window");
     }
 
     fn coin(vout: u32) -> OutPoint {

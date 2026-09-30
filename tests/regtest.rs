@@ -125,6 +125,36 @@ fn non_custodial_send_flow() {
     }
 }
 
+#[test]
+#[ignore = "needs the regtest node: docker compose up -d"]
+fn registration_is_rate_limited() {
+    let server = Server::start_with(&["--register-limit-per-hour", "2"]);
+    let api = ApiClient::new(&server.url);
+    let wallet = random_wallet();
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+    };
+
+    api.register(&request).unwrap();
+    assert_eq!(api_status(api.register(&request)), 409, "2nd attempt still counts");
+    assert_eq!(api_status(api.register(&request)), 429, "3rd attempt is over the limit");
+
+    // Retry-After tells the client how long to wait (at most the 1 hour window).
+    let response = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
+        .post(&format!("{}/wallets", server.url))
+        .send_json(&request)
+        .unwrap();
+    let retry_after: u64 = response.headers()["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=3600).contains(&retry_after), "Retry-After = {retry_after}");
+
+    // Other endpoints have their own, separate limit.
+    assert!(ureq::get(&format!("{}/health", server.url)).call().is_ok());
+}
+
 /// A Core wallet with spendable coins to fund the test wallet from.
 fn funder_wallet() -> Client {
     let auth = || Auth::UserPass("wallet".into(), "wallet".into());
@@ -184,12 +214,17 @@ fn request(
     }
 }
 
-/// Registers a second, unrelated wallet and returns its token.
-fn other_wallet_token(server_url: &str) -> String {
+/// A fresh in-memory wallet with random keys.
+fn random_wallet() -> Wallet {
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
         Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
     let (ext, int) = keys::descriptors(&mnemonic.into_key()).unwrap();
-    let wallet = Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap();
+    Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap()
+}
+
+/// Registers a second, unrelated wallet and returns its token.
+fn other_wallet_token(server_url: &str) -> String {
+    let wallet = random_wallet();
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
         internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
@@ -211,6 +246,10 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    fn start_with(extra_args: &[&str]) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let data_dir = std::env::temp_dir().join(format!("bitcoin-wallet-itest-{port}"));
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
@@ -218,6 +257,7 @@ impl Server {
             .arg(&data_dir)
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
+            .args(extra_args)
             .spawn()
             .unwrap();
         let server = Server { url: format!("http://127.0.0.1:{port}"), child, data_dir };

@@ -86,10 +86,11 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
   - `401`: missing or wrong API token
   - `404`: unknown wallet or endpoint
   - `409`: wallet already registered
+  - `429`: rate limit hit; the `Retry-After` header says how many seconds to wait
   - `502`: Bitcoin Core unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
-Server options: `--data-dir` (default `server-data`) and `--listen`, plus the same RPC options as the CLI.
+Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same RPC options as the CLI.
 
 ## Security model
 
@@ -107,6 +108,7 @@ CLI (your machine)                         API server (watch-only)          Bitc
 - **The CLI verifies every server-built PSBT before signing** (`send::review`). The recipient must get exactly the requested amount, and every other output must be the wallet's own change: the CLI derives the change script itself and compares. Input values are checked against the previous transactions' hashes, so a faked input value can't hide a large fee. Only `SIGHASH_ALL` is accepted.
 - **On disk,** the mnemonic is encrypted in `wallet.sqlite`. It's decrypted only while signing, and the wallet database otherwise holds only public data.
 - **Per-wallet API tokens.** Without its token nobody can read a wallet, reveal addresses or build PSBTs (which would reserve its coins). Registering is one-shot, since descriptors aren't secret: a second registration gets `409`, never the token. A lost token can't be recovered yet; the server admin has to delete the wallet from `--data-dir` so it can be registered again. Wallets registered before tokens existed must be re-registered the same way.
+- **Rate limits per IP** stop registration spam (each registration creates a database file) and request floods (each request syncs with Core). They're in memory and use the connecting IP, so behind a reverse proxy they'd need to read `X-Forwarded-For` instead.
 - **No TLS yet,** so tokens travel in plain text. Keep the server on `127.0.0.1` (the default).
 
 ## Tests

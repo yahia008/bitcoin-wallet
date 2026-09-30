@@ -12,16 +12,18 @@ There are two ways to test the project:
 ```bash
 cd ~/bitcoin_wallet/bitcoin-wallet
 
-cargo test                       # 14 unit tests, no node needed
+cargo test                       # 19 unit tests, no node needed
 docker compose up -d             # start Bitcoin Core (regtest)
-cargo test -- --include-ignored  # 15 tests: the 14 above plus the end-to-end regtest test
+cargo test -- --include-ignored  # 21 tests: the 19 above plus the 2 end-to-end regtest tests
 ```
 
 | Test | What it checks |
 |---|---|
 | `secret::tests::*` | The mnemonic is encrypted, a wrong password is rejected, and the plaintext is never stored |
 | `send::tests::*` | `review` accepts an honest PSBT and rejects tampered ones: a changed amount, redirected change, an extra output, a weak sighash, a faked input value, a missing previous transaction |
-| `api` tests | The server accepts public descriptors and rejects private ones and garbage |
+| `server` tests | The server accepts public descriptors and rejects private ones and garbage; API tokens are random and stored hashed; coin reservations expire and release; the rate limiter blocks per IP until the window ends |
+| `client::tests::*` | The CLI saves and finds each server's API token |
+| `registration_is_rate_limited` (`tests/regtest.rs`) | With a limit of 2 registrations per hour, the 3rd gets `429` with a `Retry-After` header |
 | `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, token auth (missing, wrong, other wallet's, re-register), fund, build the PSBT, review, sign, broadcast, confirm, coin reservations |
 
 Every test should report `ok`.
