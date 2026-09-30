@@ -1,25 +1,18 @@
-mod chain;
-mod keys;
-mod secret;
-mod send;
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Network, SignedAmount, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, SignedAmount, Txid};
 use bdk_wallet::chain::{ChainPosition, ConfirmationBlockTime};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
+use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
+use bitcoin_wallet::{NETWORK, chain, confirmations, keys, load, secret, send};
 use clap::{Parser, Subcommand};
-
-/// Regtest only for now. Changing this also requires changing the coin type (1') in keys.rs.
-const NETWORK: Network = Network::Regtest;
 
 /// Used when Core can't estimate fees yet (always the case on a fresh regtest chain).
 const FALLBACK_FEE_RATE_SAT_VB: u64 = 2;
@@ -269,14 +262,6 @@ fn status(cli: &Cli, txid: &str, watch: bool, until: u32, interval: u64) -> anyh
     }
 }
 
-/// 0 while unconfirmed; 1 once in a block; +1 for every block mined on top.
-fn confirmations(tip: u32, position: &ChainPosition<ConfirmationBlockTime>) -> u32 {
-    match position {
-        ChainPosition::Unconfirmed { .. } => 0,
-        ChainPosition::Confirmed { anchor, .. } => tip - anchor.block_id.height + 1,
-    }
-}
-
 fn describe(tip: u32, position: &ChainPosition<ConfirmationBlockTime>) -> String {
     match position {
         ChainPosition::Unconfirmed { .. } => "unconfirmed".to_owned(),
@@ -351,17 +336,6 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// Loads the wallet from disk. Needs no password: the database only holds public descriptors.
-fn load(db: &Path) -> anyhow::Result<(Connection, PersistedWallet<Connection>)> {
-    let mut conn = open_existing(db)?;
-    let wallet = Wallet::load()
-        .check_network(NETWORK)
-        .load_wallet(&mut conn)
-        .context("loading wallet")?
-        .ok_or_else(|| anyhow!("{} contains no wallet", db.display()))?;
-    Ok((conn, wallet))
-}
-
 fn connect(cli: &Cli) -> anyhow::Result<chain::Client> {
     chain::connect(&cli.rpc_url, &cli.rpc_user, &cli.rpc_pass)
 }
@@ -371,13 +345,6 @@ fn ensure_new(db: &Path) -> anyhow::Result<()> {
         bail!("{} already exists; refusing to overwrite a wallet", db.display());
     }
     Ok(())
-}
-
-fn open_existing(db: &Path) -> anyhow::Result<Connection> {
-    if !db.exists() {
-        bail!("{} not found; run `create` or `restore` first", db.display());
-    }
-    Connection::open(db).context("opening wallet database")
 }
 
 /// Prompts for a new password twice and checks they match.
