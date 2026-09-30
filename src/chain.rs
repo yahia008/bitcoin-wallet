@@ -193,7 +193,15 @@ impl Backend {
                 Some(FeeRate::from_sat_per_kwu(btc_per_kvb.to_sat() / 4))
             }
             Backend::Esplora(client) => {
-                let estimates = with_retry(|| client.get_fee_estimates()).ok()?;
+                let estimates = match with_retry(|| client.get_fee_estimates()) {
+                    Ok(estimates) => estimates,
+                    // mempool.space answers 203 Non-Authoritative Information here, which
+                    // esplora-client treats as an error even though the body is the data.
+                    Err(esplora_client::Error::HttpResponse { status: 203, message }) => {
+                        serde_json::from_str(&message).ok()?
+                    }
+                    Err(_) => return None,
+                };
                 // sat/vB (a float) -> sat/kwu: 1 vbyte = 4 weight units, so x1000/4.
                 let sat_vb = esplora_client::convert_fee_rate(target.into(), estimates)?;
                 Some(FeeRate::from_sat_per_kwu((sat_vb * 250.0).ceil() as u64))
