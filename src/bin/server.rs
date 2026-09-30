@@ -250,8 +250,13 @@ async fn register_wallet(
 
     // Hash the parsed (canonical) form, so formatting differences map to the same wallet.
     let id = wallet_id(&external, &internal);
+    let birthday = req.birthday;
 
     run_blocking(move || {
+        chain::check_birthday(&state.rpc, birthday).map_err(|e| match node_error(&e) {
+            Some(_) => ApiError::from(e),
+            None => ApiError::bad_request(e.to_string()),
+        })?;
         let db = state.db_path(&id);
         // create_new claims the file atomically, so two concurrent registrations can't both
         // win (and the loser's cleanup below only ever deletes a file it created).
@@ -264,7 +269,7 @@ async fn register_wallet(
         }
 
         let token = new_token();
-        let result = create_wallet(&db, external, internal, &token);
+        let result = create_wallet(&db, external, internal, birthday, &token);
         if result.is_err() {
             let _ = std::fs::remove_file(&db);
         }
@@ -274,11 +279,12 @@ async fn register_wallet(
     .await
 }
 
-/// Writes the wallet and its token hash to `db` in one SQLite transaction.
+/// Writes the wallet, its birthday and its token hash to `db` in one SQLite transaction.
 fn create_wallet(
     db: &std::path::Path,
     external: String,
     internal: String,
+    birthday: u32,
     token: &str,
 ) -> Result<(), ApiError> {
     let mut conn = Connection::open(db)?;
@@ -288,6 +294,7 @@ fn create_wallet(
         .create_wallet(&mut tx)
         // e.g. mainnet xpub on a regtest server.
         .map_err(|e| ApiError::bad_request(format!("invalid wallet: {e}")))?;
+    chain::save_birthday(&tx, birthday)?;
     tx.execute(
         "CREATE TABLE api_token (id INTEGER PRIMARY KEY CHECK (id = 0), hash BLOB NOT NULL)",
         [],

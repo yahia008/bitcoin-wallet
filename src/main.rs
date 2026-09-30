@@ -45,7 +45,12 @@ enum Command {
     /// Create a new wallet from a freshly generated mnemonic
     Create,
     /// Restore a wallet from an existing mnemonic
-    Restore,
+    Restore {
+        /// Block height the wallet was created at, to skip scanning older blocks. If unsure,
+        /// go earlier: coins received before the birthday won't be found. Default: genesis.
+        #[arg(long)]
+        birthday: Option<u32>,
+    },
     /// Print the wallet's public descriptors (safe to share with a watch-only server)
     Export,
     /// Register this wallet (public descriptors only) with a watch-only API server
@@ -100,8 +105,8 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Create => create(&cli.db),
-        Command::Restore => restore(&cli.db),
+        Command::Create => create(&cli),
+        Command::Restore { birthday } => restore(&cli, birthday),
         Command::Export => export(&cli.db),
         Command::Register { ref server } => register(&cli.db, server),
         Command::Address => address(&cli),
@@ -122,8 +127,11 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn create(db: &Path) -> anyhow::Result<()> {
+fn create(cli: &Cli) -> anyhow::Result<()> {
+    let db = &cli.db;
     ensure_new(db)?;
+    // A brand-new wallet can't have been paid before now, so its birthday is the chain tip.
+    let birthday = chain::tip_height(&connect(cli)?)?;
 
     // 128 bits of entropy -> 12 words. Segwitv0 tells BDK which script context the key is for.
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
@@ -132,7 +140,7 @@ fn create(db: &Path) -> anyhow::Result<()> {
     let mnemonic = mnemonic.into_key();
 
     let password = new_password()?;
-    let first = init_wallet(db, &mnemonic, &password)?;
+    let first = init_wallet(db, &mnemonic, &password, birthday)?;
 
     println!("Wallet created: {}", db.display());
     println!();
@@ -141,11 +149,16 @@ fn create(db: &Path) -> anyhow::Result<()> {
     println!("    {mnemonic}");
     println!();
     println!("First receive address (index {}): {}", first.index, first.address);
+    println!("Birthday: block {birthday} (note it down too: restoring is faster with it)");
     Ok(())
 }
 
-fn restore(db: &Path) -> anyhow::Result<()> {
+fn restore(cli: &Cli, birthday: Option<u32>) -> anyhow::Result<()> {
+    let db = &cli.db;
     ensure_new(db)?;
+    if let Some(height) = birthday {
+        chain::check_birthday(&connect(cli)?, height)?;
+    }
 
     // Read with echo off so the words never appear on screen or in shell history.
     let input = rpassword::prompt_password("Recovery phrase (hidden): ")?;
@@ -155,9 +168,12 @@ fn restore(db: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("invalid recovery phrase: {e}"))?;
 
     let password = new_password()?;
-    init_wallet(db, &mnemonic, &password)?;
+    init_wallet(db, &mnemonic, &password, birthday.unwrap_or(0))?;
 
     println!("Wallet restored: {}", db.display());
+    if birthday.is_none() {
+        println!("No --birthday given: the first sync scans from genesis.");
+    }
     // Don't print index 0 here: a restored wallet has likely used it already. `address` syncs
     // first, so it knows which indexes are taken.
     println!("Run `balance` to find past transactions, and `address` for a fresh receive address.");
@@ -178,6 +194,7 @@ fn register(db: &Path, server: &str) -> anyhow::Result<()> {
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
         internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: chain::birthday(&conn)?,
     };
     let response = match ApiClient::new(server).register(&request) {
         Ok(response) => response,
@@ -451,7 +468,12 @@ fn new_password() -> anyhow::Result<String> {
 /// Creates the wallet database: BDK's wallet state plus the encrypted mnemonic, written in one
 /// SQLite transaction so we never end up with a wallet whose keys weren't saved.
 /// Returns the first receive address.
-fn init_wallet(db: &Path, mnemonic: &Mnemonic, password: &str) -> anyhow::Result<AddressInfo> {
+fn init_wallet(
+    db: &Path,
+    mnemonic: &Mnemonic,
+    password: &str,
+    birthday: u32,
+) -> anyhow::Result<AddressInfo> {
     let result = (|| {
         let (external, internal) = keys::descriptors(mnemonic)?;
         let mut conn = Connection::open(db).context("opening wallet database")?;
@@ -465,6 +487,7 @@ fn init_wallet(db: &Path, mnemonic: &Mnemonic, password: &str) -> anyhow::Result
         // Persist so the revealed index survives restarts (otherwise we'd hand out the same address).
         wallet.persist(&mut tx).context("saving wallet")?;
         secret::save(&tx, &mnemonic.to_string(), password)?;
+        chain::save_birthday(&tx, birthday)?;
 
         tx.commit().context("committing wallet")?;
         Ok(first)

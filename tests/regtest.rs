@@ -41,7 +41,8 @@ fn non_custodial_send_flow() {
     let server = Server::start();
 
     // Register: the server gets public descriptors only, and computes the same id we do.
-    let register = RegisterRequest { external: external.clone(), internal: internal.clone() };
+    let register =
+        RegisterRequest { external: external.clone(), internal: internal.clone(), birthday: 0 };
     let registration = ApiClient::new(&server.url).register(&register).unwrap();
     let (id, token) = (registration.id, registration.token);
     assert_eq!(id, wallet_id(&external, &internal));
@@ -134,6 +135,7 @@ fn registration_is_rate_limited() {
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
         internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: 0,
     };
 
     api.register(&request).unwrap();
@@ -153,6 +155,47 @@ fn registration_is_rate_limited() {
 
     // Other endpoints have their own, separate limit.
     assert!(ureq::get(&format!("{}/health", server.url)).call().is_ok());
+}
+
+#[test]
+#[ignore = "needs the regtest node: docker compose up -d"]
+fn birthday_skips_earlier_blocks() {
+    let funder = funder_wallet();
+    let wallet = random_wallet();
+    let address = wallet.peek_address(KeychainKind::External, 0).address;
+    let txid =
+        funder.send_to_address(&address, Amount::ONE_BTC, None, None, None, None, None, None).unwrap();
+    mine(&funder, 2);
+    let funded_at = funder.get_transaction(&txid, None).unwrap().info.blockheight.unwrap();
+
+    let confirmed = |birthday: u32| {
+        let server = Server::start();
+        let request = RegisterRequest {
+            external: wallet.public_descriptor(KeychainKind::External).to_string(),
+            internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+            birthday,
+        };
+        let token = ApiClient::new(&server.url).register(&request).unwrap().token;
+        let id = wallet_id(&request.external, &request.internal);
+        http("GET", &format!("{}/wallets/{id}/balance", server.url), &token)["confirmed_sat"]
+            .as_u64()
+            .unwrap()
+    };
+    // A birthday after the funding block means that block is never scanned: the coin is
+    // invisible. That's why a birthday that's too late is the dangerous mistake.
+    assert_eq!(confirmed(funded_at + 1), 0);
+    assert_eq!(confirmed(funded_at), 100_000_000);
+
+    // A birthday past the chain tip is rejected up front.
+    let server = Server::start();
+    let tip = funder.get_block_count().unwrap() as u32;
+    let wallet = random_wallet();
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: tip + 1000,
+    };
+    assert_eq!(api_status(ApiClient::new(&server.url).register(&request)), 400);
 }
 
 /// A Core wallet with spendable coins to fund the test wallet from.
@@ -228,6 +271,7 @@ fn other_wallet_token(server_url: &str) -> String {
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
         internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: 0,
     };
     ApiClient::new(server_url).register(&request).unwrap().token
 }

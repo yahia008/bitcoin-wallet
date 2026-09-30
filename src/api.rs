@@ -10,6 +10,10 @@ pub struct RegisterRequest {
     pub external: String,
     /// Change descriptor, e.g. `wpkh([fingerprint/84'/1'/0']tpub.../1/*)`
     pub internal: String,
+    /// Height of the first block that could hold the wallet's transactions; the server's
+    /// first sync starts there. Omit (0) to scan from genesis.
+    #[serde(default)]
+    pub birthday: u32,
 }
 
 #[derive(Serialize, Deserialize)]

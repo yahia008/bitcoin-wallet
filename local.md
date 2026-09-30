@@ -28,7 +28,7 @@ To keep the `bcli` alias, put the line above in `~/.bashrc`. If `~/.bashrc` alre
 ## 1. Create a wallet (spec: create wallet, BIP39, BIP84)
 
 ```bash
-bw create           # choose a password (8+ characters)
+bw create           # choose a password (8+ characters); prints the birthday (current block)
 bw export           # shows the path: [fingerprint/84'/1'/0'] …/0/* receive, …/1/* change
 ```
 

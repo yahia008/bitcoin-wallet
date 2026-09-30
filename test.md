@@ -12,9 +12,9 @@ There are two ways to test the project:
 ```bash
 cd ~/bitcoin_wallet/bitcoin-wallet
 
-cargo test                       # 19 unit tests, no node needed
+cargo test                       # 21 unit tests, no node needed
 docker compose up -d             # start Bitcoin Core (regtest)
-cargo test -- --include-ignored  # 21 tests: the 19 above plus the 2 end-to-end regtest tests
+cargo test -- --include-ignored  # 24 tests: the 21 above plus the 3 end-to-end regtest tests
 ```
 
 | Test | What it checks |
@@ -23,6 +23,8 @@ cargo test -- --include-ignored  # 21 tests: the 19 above plus the 2 end-to-end 
 | `send::tests::*` | `review` accepts an honest PSBT and rejects tampered ones: a changed amount, redirected change, an extra output, a weak sighash, a faked input value, a missing previous transaction |
 | `server` tests | The server accepts public descriptors and rejects private ones and garbage; API tokens are random and stored hashed; coin reservations expire and release; the rate limiter blocks per IP until the window ends |
 | `client::tests::*` | The CLI saves and finds each server's API token |
+| `chain::tests::*` | The birthday is saved and read back, and wallets without one scan from genesis |
+| `birthday_skips_earlier_blocks` (`tests/regtest.rs`) | Registered with a birthday after its funding block, a wallet shows 0; with the right birthday it finds the coin. A birthday past the tip is `400` |
 | `registration_is_rate_limited` (`tests/regtest.rs`) | With a limit of 2 registrations per hour, the 3rd gets `429` with a `Retry-After` header |
 | `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, token auth (missing, wrong, other wallet's, re-register), fund, build the PSBT, review, sign, broadcast, confirm, coin reservations |
 
@@ -59,7 +61,7 @@ Each step lists the MVP requirement it covers and the result to expect.
 ```bash
 bw create
 ```
-Expect: 12 words shown **once**, and a first address starting with `bcrt1q`. **Write down the words** for the restore test.
+Expect: 12 words shown **once**, a first address starting with `bcrt1q`, and `Birthday: block N`. **Write down the words and N** for the restore test.
 
 #### ✅ BIP32 / BIP84 derivation
 ```bash
@@ -121,12 +123,13 @@ bw history        # now shows the -0.4… send with its fee
 
 #### ✅ Restore from an existing mnemonic
 ```bash
-cargo run -q -- --db restored.sqlite restore    # type the 12 words from the create step
+cargo run -q -- --db restored.sqlite restore --birthday <N>   # the 12 words and birthday from the create step
 cargo run -q -- --db restored.sqlite balance    # same balance as demo.sqlite
 cargo run -q -- --db restored.sqlite history    # same transactions
 cargo run -q -- --db restored.sqlite address    # skips the addresses already used
 ```
 Also try: a wrong word, or the words in the wrong order. It should fail with "invalid recovery phrase".
+Also try: `restore --birthday 99999999`. It should fail right away with "birthday … is past the chain tip", before asking for the words.
 
 ---
 

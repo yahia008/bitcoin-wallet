@@ -10,6 +10,7 @@ It currently runs on **regtest** only.
 ## Features
 
 - BIP39 mnemonic (12 words); create or restore
+- Wallet birthday: the first sync starts at the block the wallet was created at, not at genesis
 - BIP84 native SegWit derivation: `m/84'/1'/0'/0/*` for receive, `m/84'/1'/0'/1/*` for change
 - Fresh receive addresses, with tracking of which ones have been used
 - Sync with Bitcoin Core (blocks and mempool); confirmed, unconfirmed and immature balance
@@ -45,8 +46,8 @@ cargo run -- status <txid> --watch
 
 | Command | Needs password | What it does |
 |---|---|---|
-| `create` | sets one | New wallet from a freshly generated mnemonic |
-| `restore` | sets one | Restore from an existing mnemonic (entered at a hidden prompt) |
+| `create` | sets one | New wallet from a freshly generated mnemonic; its birthday is the current chain tip, so Core must be running |
+| `restore [--birthday H]` | sets one | Restore from an existing mnemonic (entered at a hidden prompt). Without `--birthday` the first sync scans from genesis; if unsure, pick an earlier height, since coins received before the birthday won't be found |
 | `export` | no | Print the public descriptors |
 | `register --server URL` | no | Register the public descriptors with an API server |
 | `address` | no | Sync, then reveal a fresh receive address |
@@ -70,7 +71,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
 | GET | `/health` | | `{"status":"ok"}` |
-| POST | `/wallets` | `{external, internal}` public descriptors | `201` `{id, token}` (`409` if already registered) |
+| POST | `/wallets` | `{external, internal, birthday?}` public descriptors + start height | `201` `{id, token}` (`409` if already registered) |
 | GET | `/wallets/{id}/balance` | | `{confirmed_sat, unconfirmed_sat, immature_sat, total_sat}` |
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
@@ -138,6 +139,6 @@ tests/regtest.rs    end-to-end test
 ## Known limitations
 
 - Regtest only; the coin type and network are fixed in `keys.rs` and `lib.rs`.
-- The API has no authentication or TLS.
-- Two PSBTs built at the same time from one wallet can pick the same coins. Only the first one broadcast succeeds.
-- Wallets sync from the genesis block. That's fine on regtest, but mainnet would need a "birthday" height to start from.
+- The API has no TLS.
+- A lost API token can't be recovered; the server admin has to delete the wallet so it can be registered again.
+- Coin reservations and rate-limit counts live in memory, so a server restart clears them.
