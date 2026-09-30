@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use bdk_bitcoind_rpc::bitcoincore_rpc::RpcApi;
 use bdk_wallet::bitcoin::bip32::ChildNumber;
-use bdk_wallet::bitcoin::{Address, Amount, EcdsaSighashType, FeeRate, Psbt, Transaction, Txid};
+use bdk_wallet::bitcoin::{
+    Address, Amount, EcdsaSighashType, FeeRate, OutPoint, Psbt, Transaction, Txid,
+};
 use bdk_wallet::error::CreateTxError;
 use bdk_wallet::keys::bip39::Mnemonic;
 use bdk_wallet::miniscript::descriptor::{KeyMap, KeyMapWrapper};
@@ -74,14 +76,20 @@ impl std::fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 /// Selects coins and builds an unsigned PSBT paying `amount` to `to`, with change back to us.
+/// Coins in `unspendable` are never selected (the server passes coins reserved by PSBTs it
+/// has handed out but not yet seen broadcast).
 pub fn build(
     wallet: &mut Wallet,
     to: &Address,
     amount: Amount,
     fee_rate: FeeRate,
+    unspendable: &[OutPoint],
 ) -> Result<Draft, BuildError> {
     let mut builder = wallet.build_tx();
-    builder.add_recipient(to.script_pubkey(), amount).fee_rate(fee_rate);
+    builder
+        .add_recipient(to.script_pubkey(), amount)
+        .fee_rate(fee_rate)
+        .unspendable(unspendable.to_vec());
     let psbt = builder.finish().map_err(|e| match e {
         CreateTxError::CoinSelection(e) => BuildError::InsufficientFunds(e.to_string()),
         CreateTxError::OutputBelowDustLimit(_) => BuildError::BelowDust,
@@ -244,7 +252,7 @@ mod tests {
     use bdk_wallet::bitcoin::hashes::Hash;
     use bdk_wallet::bitcoin::transaction::Version;
     use bdk_wallet::bitcoin::psbt::PsbtSighashType;
-    use bdk_wallet::bitcoin::{OutPoint, TxIn, TxOut};
+    use bdk_wallet::bitcoin::{TxIn, TxOut};
 
     use super::*;
     use crate::NETWORK;
@@ -279,8 +287,9 @@ mod tests {
         wallet.apply_unconfirmed_txs([(funding, 0)]);
 
         let fee_rate = FeeRate::from_sat_per_vb(2).unwrap();
-        let draft = build(&mut wallet, &addr(RECIPIENT), Amount::from_sat(30_000_000), fee_rate)
-            .unwrap();
+        let draft =
+            build(&mut wallet, &addr(RECIPIENT), Amount::from_sat(30_000_000), fee_rate, &[])
+                .unwrap();
         (wallet, draft.psbt)
     }
 

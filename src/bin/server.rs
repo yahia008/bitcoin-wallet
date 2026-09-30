@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use axum::extract::rejection::JsonRejection;
@@ -15,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Error as RpcError, jsonrpc};
-use bdk_wallet::bitcoin::{Address, Amount, Psbt, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, OutPoint, Psbt, Transaction, Txid};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::rusqlite::Connection;
@@ -53,9 +54,46 @@ struct Args {
     rpc_pass: String,
 }
 
+/// How long coins picked for a PSBT stay reserved if the client never broadcasts it.
+const RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
+
 struct WalletEntry {
     conn: Connection,
     wallet: PersistedWallet<Connection>,
+    reserved: Reservations,
+}
+
+/// Coins picked for PSBTs that were handed out but not broadcast yet. BDK only learns a coin
+/// is spent once its transaction is broadcast, so without this two /psbt calls in a row would
+/// pick the same coins and the second broadcast would be rejected as a double-spend.
+///
+/// Kept in memory only: after a restart the worst case is that old behavior, not lost funds.
+#[derive(Default)]
+struct Reservations(HashMap<OutPoint, Instant>);
+
+impl Reservations {
+    /// Forgets reservations that expired by `now` and returns the coins still reserved.
+    fn active(&mut self, now: Instant) -> Vec<OutPoint> {
+        self.0.retain(|_, expires| *expires > now);
+        self.0.keys().copied().collect()
+    }
+
+    fn reserve(&mut self, coins: impl IntoIterator<Item = OutPoint>, until: Instant) {
+        for coin in coins {
+            self.0.insert(coin, until);
+        }
+    }
+
+    fn release(&mut self, coins: impl IntoIterator<Item = OutPoint>) {
+        for coin in coins {
+            self.0.remove(&coin);
+        }
+    }
+}
+
+/// The coins a transaction spends.
+fn spent_coins(tx: &Transaction) -> impl Iterator<Item = OutPoint> + '_ {
+    tx.input.iter().map(|input| input.previous_output)
 }
 
 struct AppState {
@@ -286,10 +324,24 @@ async fn build_psbt(
     let (draft, fee_rate) = with_wallet(state, id, move |w, rpc| {
         let fee_rate = send::choose_fee_rate(rpc, req.fee_rate_sat_vb)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let draft = send::build(&mut w.wallet, &to, amount, fee_rate).map_err(|e| match e {
-            BuildError::Other(e) => ApiError::from(e),
-            e => ApiError::bad_request(e.to_string()),
+        let now = Instant::now();
+        let reserved = w.reserved.active(now);
+        let draft = send::build(&mut w.wallet, &to, amount, fee_rate, &reserved).map_err(|e| {
+            match e {
+                BuildError::Other(e) => ApiError::from(e),
+                // The balance can look big enough while coins sit reserved; say why.
+                e @ BuildError::InsufficientFunds(_) if !reserved.is_empty() => {
+                    ApiError::bad_request(format!(
+                        "{e} ({} coin(s) are reserved by PSBTs not broadcast yet; they free up \
+                         once broadcast or after {} minutes)",
+                        reserved.len(),
+                        RESERVATION_TTL.as_secs() / 60,
+                    ))
+                }
+                e => ApiError::bad_request(e.to_string()),
+            }
         })?;
+        w.reserved.reserve(spent_coins(&draft.psbt.unsigned_tx), now + RESERVATION_TTL);
         Ok((draft, fee_rate))
     })
     .await?;
@@ -316,14 +368,18 @@ async fn broadcast(
     let txid = with_wallet(state, id, move |w, rpc| {
         let tx = send::finalize(&w.wallet, psbt)
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
-        let WalletEntry { conn, wallet } = w;
-        send::broadcast(wallet, conn, rpc, tx).map_err(|e| match node_error(&e) {
+        let spent: Vec<OutPoint> = spent_coins(&tx).collect();
+        let WalletEntry { conn, wallet, reserved } = w;
+        let txid = send::broadcast(wallet, conn, rpc, tx).map_err(|e| match node_error(&e) {
             // Core answered, but refused the tx (e.g. double-spend, fee too low): client's issue.
             Some(RpcError::JsonRpc(jsonrpc::Error::Rpc(rejection))) => ApiError::bad_request(
                 format!("Bitcoin Core rejected the transaction: {}", rejection.message),
             ),
             _ => e.into(),
-        })
+        })?;
+        // BDK now sees these coins as spent, so the reservation has done its job.
+        reserved.release(spent);
+        Ok(txid)
     })
     .await?;
     Ok(Json(BroadcastResponse { txid: txid.to_string() }))
@@ -351,7 +407,8 @@ impl AppState {
             return Err(ApiError::not_found("wallet not found"));
         }
         let (conn, wallet) = load(&db)?;
-        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet }));
+        let reserved = Reservations::default();
+        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved }));
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -367,7 +424,7 @@ async fn with_wallet<T: Send + 'static>(
     run_blocking(move || {
         let entry = state.wallet(&id)?;
         let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
-        let WalletEntry { conn, wallet } = &mut *entry;
+        let WalletEntry { conn, wallet, .. } = &mut *entry;
         chain::sync(wallet, conn, &state.rpc)?;
         f(&mut entry, &state.rpc)
     })
@@ -485,5 +542,27 @@ mod tests {
     fn rejects_garbage() {
         let err = public_descriptor("wpkh(not-a-key)").err().unwrap();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    fn coin(vout: u32) -> OutPoint {
+        OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), vout)
+    }
+
+    #[test]
+    fn reservations_expire() {
+        let now = Instant::now();
+        let mut r = Reservations::default();
+        r.reserve([coin(0)], now + RESERVATION_TTL);
+        assert_eq!(r.active(now), vec![coin(0)]);
+        assert!(r.active(now + RESERVATION_TTL).is_empty());
+    }
+
+    #[test]
+    fn release_frees_only_the_given_coins() {
+        let now = Instant::now();
+        let mut r = Reservations::default();
+        r.reserve([coin(0), coin(1)], now + RESERVATION_TTL);
+        r.release([coin(0)]);
+        assert_eq!(r.active(now), vec![coin(1)]);
     }
 }

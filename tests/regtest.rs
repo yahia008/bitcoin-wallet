@@ -92,6 +92,29 @@ fn non_custodial_send_flow() {
     // Broadcasting it again: Core refuses (outputs already exist), which is the client's
     // problem, so 400 rather than 5xx.
     assert_eq!(api_status(api.broadcast(&id, &signed)), 400);
+
+    // Coin reservations. Fund a second coin so the wallet holds two (the 0.7 BTC change
+    // plus this 1 BTC), then build two PSBTs before broadcasting either.
+    funder.send_to_address(&address, Amount::ONE_BTC, None, None, None, None, None, None).unwrap();
+    mine(&funder, 1);
+    let first = Psbt::from_str(&api.build_psbt(&id, &request).unwrap().psbt).unwrap();
+    let second = Psbt::from_str(&api.build_psbt(&id, &request).unwrap().psbt).unwrap();
+    let coins = |p: &Psbt| p.unsigned_tx.input.iter().map(|i| i.previous_output).collect::<Vec<_>>();
+    assert!(
+        coins(&first).iter().all(|c| !coins(&second).contains(c)),
+        "second PSBT must not reuse coins reserved by the first"
+    );
+
+    // Every coin is reserved now, so a third PSBT can't be built, and the error says why.
+    let err = api.build_psbt(&id, &request).err().expect("all coins are reserved");
+    assert!(format!("{err:#}").contains("reserved"), "unexpected error: {err:#}");
+
+    // Both still broadcast: before reservations, the second would be a double-spend.
+    for mut psbt in [first, second] {
+        send::review(&local, &psbt, &dest, amount).unwrap();
+        send::sign(&local, &mnemonic, &mut psbt).unwrap();
+        api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() }).unwrap();
+    }
 }
 
 /// A Core wallet with spendable coins to fund the test wallet from.

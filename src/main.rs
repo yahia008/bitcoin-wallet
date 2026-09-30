@@ -308,7 +308,7 @@ fn send_local(
     chain::sync(&mut wallet, &mut conn, &rpc)?;
 
     let fee_rate = send::choose_fee_rate(&rpc, fee_rate)?;
-    let draft = send::build(&mut wallet, to, amount, fee_rate)?;
+    let draft = send::build(&mut wallet, to, amount, fee_rate, &[])?;
     print_summary(to, amount, draft.fee, draft.change, draft.inputs);
 
     // Returning here without persisting also discards the change address the builder revealed.
