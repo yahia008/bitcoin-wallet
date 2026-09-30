@@ -1,6 +1,7 @@
 //! Wallet logic shared by the CLI (`src/main.rs`) and the HTTP server (`src/bin/server.rs`).
 
 pub mod chain;
+pub mod history;
 pub mod keys;
 pub mod secret;
 pub mod send;

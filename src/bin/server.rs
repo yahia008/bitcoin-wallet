@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
@@ -12,12 +13,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bdk_wallet::bitcoin::Txid;
 use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{PersistedWallet, Wallet};
-use bitcoin_wallet::{NETWORK, chain, load};
+use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
+use bitcoin_wallet::{NETWORK, chain, history, load};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +78,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/wallets", post(register_wallet))
         .route("/wallets/{id}/balance", get(balance))
+        .route("/wallets/{id}/addresses", get(list_addresses).post(new_address))
+        .route("/wallets/{id}/transactions", get(list_transactions))
+        .route("/wallets/{id}/transactions/{txid}", get(get_transaction))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -173,15 +178,7 @@ async fn balance(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<BalanceResponse>, ApiError> {
-    let balance = run_blocking(move || {
-        let entry = state.wallet(&id)?;
-        let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
-        let WalletEntry { conn, wallet } = &mut *entry;
-        chain::sync(wallet, conn, &state.rpc)?;
-        Ok(wallet.balance())
-    })
-    .await?;
-
+    let balance = with_wallet(state, id, |w| Ok(w.wallet.balance())).await?;
     Ok(Json(BalanceResponse {
         confirmed_sat: balance.confirmed.to_sat(),
         // trusted_pending = our own unconfirmed change; untrusted_pending = incoming from others.
@@ -189,6 +186,93 @@ async fn balance(
         immature_sat: balance.immature.to_sat(),
         total_sat: balance.total().to_sat(),
     }))
+}
+
+#[derive(Serialize)]
+struct AddressResponse {
+    index: u32,
+    address: String,
+    used: bool,
+}
+
+/// Hands out a fresh receive address and records that its index is now in use.
+async fn new_address(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<AddressResponse>), ApiError> {
+    // Sync first so indexes already paid to on chain count as used; otherwise a fresh or
+    // stale wallet would hand out an address that was already used (address reuse).
+    let info = with_wallet(state, id, |w| {
+        let info = w.wallet.reveal_next_address(KeychainKind::External);
+        w.wallet.persist(&mut w.conn).map_err(anyhow::Error::from)?;
+        Ok(info)
+    })
+    .await?;
+    let response =
+        AddressResponse { index: info.index, address: info.address.to_string(), used: false };
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn list_addresses(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AddressResponse>>, ApiError> {
+    let addresses =
+        with_wallet(state, id, |w| Ok(history::receive_addresses(&w.wallet))).await?;
+    Ok(Json(
+        addresses
+            .into_iter()
+            .map(|a| AddressResponse { index: a.index, address: a.address.to_string(), used: a.used })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+struct TransactionResponse {
+    txid: String,
+    /// Effect on the balance: positive = received, negative = sent (fee included).
+    net_sat: i64,
+    /// null unless this wallet paid the fee.
+    fee_sat: Option<u64>,
+    confirmed: bool,
+    confirmations: u32,
+    block_height: Option<u32>,
+}
+
+impl From<history::TxSummary> for TransactionResponse {
+    fn from(tx: history::TxSummary) -> Self {
+        TransactionResponse {
+            txid: tx.txid.to_string(),
+            net_sat: tx.net.to_sat(),
+            fee_sat: tx.fee.map(|fee| fee.to_sat()),
+            confirmed: tx.block_height.is_some(),
+            confirmations: tx.confirmations,
+            block_height: tx.block_height,
+        }
+    }
+}
+
+async fn list_transactions(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<TransactionResponse>>, ApiError> {
+    let txs = with_wallet(state, id, |w| Ok(history::transactions(&w.wallet))).await?;
+    Ok(Json(txs.into_iter().map(Into::into).collect()))
+}
+
+/// Poll this to track confirmations after broadcasting.
+async fn get_transaction(
+    State(state): State<SharedState>,
+    Path((id, txid)): Path<(String, String)>,
+) -> Result<Json<TransactionResponse>, ApiError> {
+    let txid = Txid::from_str(&txid).map_err(|_| ApiError::bad_request("invalid txid"))?;
+    let tx = with_wallet(state, id, move |w| {
+        history::transaction(&w.wallet, txid).ok_or_else(|| {
+            ApiError::not_found("transaction not found: not a wallet transaction, or dropped from the mempool")
+        })
+    })
+    .await?;
+    Ok(Json(tx.into()))
 }
 
 impl AppState {
@@ -217,6 +301,23 @@ impl AppState {
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
     }
+}
+
+/// Syncs wallet `id` with Bitcoin Core, then runs `f` with exclusive access to it on a
+/// blocking thread.
+async fn with_wallet<T: Send + 'static>(
+    state: SharedState,
+    id: String,
+    f: impl FnOnce(&mut WalletEntry) -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    run_blocking(move || {
+        let entry = state.wallet(&id)?;
+        let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
+        let WalletEntry { conn, wallet } = &mut *entry;
+        chain::sync(wallet, conn, &state.rpc)?;
+        f(&mut entry)
+    })
+    .await
 }
 
 /// Runs blocking work (BDK, SQLite, Bitcoin Core RPC) off the async runtime's worker threads.

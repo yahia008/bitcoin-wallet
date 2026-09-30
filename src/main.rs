@@ -4,14 +4,13 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, SignedAmount, Txid};
-use bdk_wallet::chain::{ChainPosition, ConfirmationBlockTime};
+use bdk_wallet::bitcoin::{Address, Amount, Denomination, FeeRate, Txid};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
-use bitcoin_wallet::{NETWORK, chain, confirmations, keys, load, secret, send};
+use bitcoin_wallet::{NETWORK, chain, history, keys, load, secret, send};
 use clap::{Parser, Subcommand};
 
 /// Used when Core can't estimate fees yet (always the case on a fresh regtest chain).
@@ -95,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         Command::Create => create(&cli.db),
         Command::Restore => restore(&cli.db),
         Command::Export => export(&cli.db),
-        Command::Address => address(&cli.db),
+        Command::Address => address(&cli),
         Command::Addresses => addresses(&cli),
         Command::Sync => sync(&cli),
         Command::Balance => balance(&cli),
@@ -142,10 +141,12 @@ fn restore(db: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("invalid recovery phrase: {e}"))?;
 
     let password = new_password()?;
-    let first = init_wallet(db, &mnemonic, &password)?;
+    init_wallet(db, &mnemonic, &password)?;
 
     println!("Wallet restored: {}", db.display());
-    println!("First receive address (index {}): {}", first.index, first.address);
+    // Don't print index 0 here: a restored wallet has likely used it already. `address` syncs
+    // first, so it knows which indexes are taken.
+    println!("Run `balance` to find past transactions, and `address` for a fresh receive address.");
     Ok(())
 }
 
@@ -157,8 +158,11 @@ fn export(db: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn address(db: &Path) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(db)?;
+fn address(cli: &Cli) -> anyhow::Result<()> {
+    let (mut conn, mut wallet) = load(&cli.db)?;
+    // Sync first so indexes already paid to on chain count as used; otherwise a restored or
+    // stale wallet would hand out an address that was already used (address reuse).
+    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
     let next = wallet.reveal_next_address(KeychainKind::External);
     wallet.persist(&mut conn).context("saving wallet")?;
 
@@ -171,14 +175,12 @@ fn addresses(cli: &Cli) -> anyhow::Result<()> {
     // Sync first: "used" means a transaction paying to it has been seen on chain or in the mempool.
     chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
 
-    let Some(last) = wallet.derivation_index(KeychainKind::External) else {
+    let addresses = history::receive_addresses(&wallet);
+    if addresses.is_empty() {
         println!("No receive addresses revealed yet.");
-        return Ok(());
-    };
-    for index in 0..=last {
-        let info = wallet.peek_address(KeychainKind::External, index);
-        let used = wallet.spk_index().is_used(KeychainKind::External, index);
-        println!("{index:>4}  {}  {}", info.address, if used { "used" } else { "unused" });
+    }
+    for a in addresses {
+        println!("{:>4}  {}  {}", a.index, a.address, if a.used { "used" } else { "unused" });
     }
     Ok(())
 }
@@ -211,35 +213,21 @@ fn balance(cli: &Cli) -> anyhow::Result<()> {
 fn history(cli: &Cli) -> anyhow::Result<()> {
     let (mut conn, mut wallet) = load(&cli.db)?;
     chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
-    let tip = wallet.latest_checkpoint().height();
 
-    let mut txs: Vec<_> = wallet.transactions().collect();
+    let txs = history::transactions(&wallet);
     if txs.is_empty() {
         println!("No transactions yet.");
         return Ok(());
     }
-    // Unconfirmed first, then confirmed from newest block to oldest.
-    txs.sort_by_key(|tx| match tx.chain_position {
-        ChainPosition::Unconfirmed { .. } => (0, 0),
-        ChainPosition::Confirmed { anchor, .. } => (1, u32::MAX - anchor.block_id.height),
-    });
-
     println!("{:<64}  {:>17}  {:>12}  STATUS", "TXID", "AMOUNT", "FEE");
     for tx in txs {
-        let (sent, received) = wallet.sent_and_received(&tx.tx_node.tx);
-        let net = SignedAmount::from_sat(received.to_sat() as i64 - sent.to_sat() as i64);
-        // Only show fees we paid. BDK can sometimes compute the fee of an incoming tx too (when
-        // the sender spent change from an earlier payment to us), but that fee isn't ours.
-        let fee = match wallet.calculate_fee(&tx.tx_node.tx) {
-            Ok(fee) if sent.to_sat() > 0 => format!("{} sat", fee.to_sat()),
-            _ => "-".to_owned(),
-        };
-        let status = describe(tip, &tx.chain_position);
+        let fee = tx.fee.map_or("-".to_owned(), |fee| format!("{} sat", fee.to_sat()));
         println!(
-            "{}  {:>17}  {:>12}  {status}",
-            tx.tx_node.txid,
-            format!("{:+.8}", net.to_btc()),
-            fee
+            "{}  {:>17}  {:>12}  {}",
+            tx.txid,
+            format!("{:+.8}", tx.net.to_btc()),
+            fee,
+            tx.status()
         );
     }
     Ok(())
@@ -254,33 +242,19 @@ fn status(cli: &Cli, txid: &str, watch: bool, until: u32, interval: u64) -> anyh
     loop {
         // Each sync only fetches blocks we haven't seen, so polling like this is cheap.
         chain::sync(&mut wallet, &mut conn, &rpc)?;
-        let tip = wallet.latest_checkpoint().height();
-        // get_tx only returns txs in the wallet's current view of the chain, so a tx that was
-        // replaced or evicted from the mempool shows up as missing.
-        let Some(tx) = wallet.get_tx(txid) else {
+        let Some(tx) = history::transaction(&wallet, txid) else {
             bail!("{txid} not found: not a wallet transaction, or dropped from the mempool");
         };
 
-        let line = describe(tip, &tx.chain_position);
+        let line = tx.status();
         if last_printed.as_ref() != Some(&line) {
             println!("{line}");
             last_printed = Some(line);
         }
-        if !watch || confirmations(tip, &tx.chain_position) >= until {
+        if !watch || tx.confirmations >= until {
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(interval));
-    }
-}
-
-fn describe(tip: u32, position: &ChainPosition<ConfirmationBlockTime>) -> String {
-    match position {
-        ChainPosition::Unconfirmed { .. } => "unconfirmed".to_owned(),
-        ChainPosition::Confirmed { anchor, .. } => format!(
-            "{} conf (block {})",
-            confirmations(tip, position),
-            anchor.block_id.height
-        ),
     }
 }
 
