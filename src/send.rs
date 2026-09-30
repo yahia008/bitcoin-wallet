@@ -87,6 +87,30 @@ pub fn signed_fee_rate(tx: &Transaction, fee: Amount) -> f64 {
     fee.to_sat() as f64 / weight.div_ceil(4) as f64
 }
 
+/// Above this rate a fee is almost certainly a typo: even busy mainnet rarely goes past a few
+/// hundred sat/vB.
+const MAX_FEE_RATE_SAT_VB: f64 = 500.0;
+/// A fee over this share of the amount sent looks like a mistake...
+const MAX_FEE_PERCENT: u64 = 10;
+/// ...unless it's small anyway: small payments often pay a big share in fees, harmlessly.
+const FEE_PERCENT_FLOOR: Amount = Amount::from_sat(10_000);
+
+/// Refuses fees that look like a mistake (a mistyped --fee-rate, or a server trying to drain
+/// the wallet through fees): over MAX_FEE_RATE_SAT_VB, or over MAX_FEE_PERCENT of `amount`
+/// once the fee is above FEE_PERCENT_FLOOR.
+pub fn check_fee(tx: &Transaction, amount: Amount, fee: Amount) -> anyhow::Result<()> {
+    let rate = signed_fee_rate(tx, fee);
+    if rate > MAX_FEE_RATE_SAT_VB {
+        bail!("fee rate ~{rate:.0} sat/vB is above {MAX_FEE_RATE_SAT_VB} sat/vB");
+    }
+    // Compare in integers: fee / amount > MAX_FEE_PERCENT / 100.
+    if fee > FEE_PERCENT_FLOOR && fee.to_sat() * 100 > amount.to_sat() * MAX_FEE_PERCENT {
+        let percent = fee.to_sat() * 100 / amount.to_sat().max(1);
+        bail!("fee {fee} is {percent}% of the {amount} being sent");
+    }
+    Ok(())
+}
+
 /// An unsigned transaction plus the numbers the user should check before signing.
 pub struct Draft {
     pub psbt: Psbt,
@@ -435,6 +459,21 @@ mod tests {
         let tx = finalize(&wallet, psbt).unwrap();
         let real = fee.to_sat() as f64 / tx.vsize() as f64;
         assert!(estimate <= real && estimate > real * 0.98, "estimate {estimate}, real {real}");
+    }
+
+    #[test]
+    fn fee_guard() {
+        let (_, psbt) = setup(); // ~141 vB
+        let tx = &psbt.unsigned_tx;
+        let sats = Amount::from_sat;
+        // Normal: 2 sat/vB on 0.3 BTC.
+        assert!(check_fee(tx, sats(30_000_000), sats(282)).is_ok());
+        // Small fee, big share of a small payment: fine.
+        assert!(check_fee(tx, sats(1_000), sats(5_000)).is_ok());
+        // Over 10% and over the floor.
+        assert!(check_fee(tx, sats(100_000), sats(20_000)).is_err());
+        // Rate cap: ~700 sat/vB, however large the amount.
+        assert!(check_fee(tx, sats(30_000_000), sats(100_000)).is_err());
     }
 
     #[test]

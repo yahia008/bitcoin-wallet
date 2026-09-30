@@ -16,6 +16,7 @@ It currently runs on **regtest** only.
 - Sync with Bitcoin Core (blocks and mempool); confirmed, unconfirmed and immature balance
 - Transaction history with fees and confirmation counts
 - Coin selection, fee estimation (`send --fee fast|normal|slow` targets 2, 6 or 144 blocks, or `--fee-rate N` for an exact sat/vB; never below 1 sat/vB), PSBT signing and broadcast
+- High-fee guard: `send` refuses to sign a fee over 500 sat/vB, or over 10% of the amount once the fee is above 10,000 sats, unless you pass `--allow-high-fee`. It also applies to PSBTs from the API server, so a compromised server can't drain the wallet through fees
 - Confirmation tracking (`status --watch`, or polling the API)
 - Only the account key (m/84'/1'/0') is kept, encrypted at rest (Argon2id + XChaCha20-Poly1305); the mnemonic is never stored. Wallet state in SQLite
 
