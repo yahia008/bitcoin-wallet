@@ -18,7 +18,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bdk_bitcoind_rpc::bitcoincore_rpc::{Error as RpcError, jsonrpc};
 use bdk_wallet::bitcoin::{Address, Amount, Network, OutPoint, Psbt, Transaction, Txid};
 use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::bitcoin::hex::DisplayHex;
@@ -31,7 +30,8 @@ use bitcoin_wallet::api::{
     RegisterResponse,
 };
 use bitcoin_wallet::send::{self, BuildError};
-use bitcoin_wallet::{chain, default_rpc_url, history, load, parse_network, wallet_id};
+use bitcoin_wallet::chain::{self, Backend, BackendError, ChainArgs};
+use bitcoin_wallet::{history, load, wallet_id};
 use chacha20poly1305::aead::Generate;
 use clap::Parser;
 use serde::Serialize;
@@ -47,22 +47,9 @@ struct Args {
     #[arg(long, env = "LISTEN", default_value = "127.0.0.1:3000")]
     listen: SocketAddr,
 
-    /// Which chain registered wallets live on: regtest, signet, testnet or testnet4.
-    /// Use a separate data dir per network.
-    #[arg(long, env = "NETWORK", default_value = "regtest", value_parser = parse_network)]
-    network: Network,
-
-    /// Bitcoin Core RPC URL [default: localhost on the network's default port]
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: Option<String>,
-
-    /// Bitcoin Core RPC username
-    #[arg(long, env = "RPC_USER", default_value = "wallet")]
-    rpc_user: String,
-
-    /// Bitcoin Core RPC password
-    #[arg(long, env = "RPC_PASS", default_value = "wallet", hide_default_value = true)]
-    rpc_pass: String,
+    /// Use a separate data dir per network: wallets are tied to the one they registered on.
+    #[command(flatten)]
+    chain: ChainArgs,
 
     /// Requests per minute allowed from one IP, across all endpoints
     #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 60)]
@@ -182,7 +169,7 @@ fn spent_coins(tx: &Transaction) -> impl Iterator<Item = OutPoint> + '_ {
 struct AppState {
     data_dir: PathBuf,
     network: Network,
-    rpc: chain::Client,
+    backend: Backend,
     /// Wallets opened so far. Each has its own lock, so requests for different wallets
     /// don't wait on each other; requests for the same wallet run one at a time.
     wallets: Mutex<HashMap<String, Arc<Mutex<WalletEntry>>>>,
@@ -195,12 +182,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     std::fs::create_dir_all(&args.data_dir)?;
-    let rpc_url = args.rpc_url.unwrap_or_else(|| default_rpc_url(args.network));
-    let rpc = chain::connect(&rpc_url, &args.rpc_user, &args.rpc_pass, args.network)?;
+    let backend = args.chain.connect()?;
     let state = Arc::new(AppState {
         data_dir: args.data_dir,
-        network: args.network,
-        rpc,
+        network: args.chain.network,
+        backend,
         wallets: Mutex::new(HashMap::new()),
     });
 
@@ -225,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    println!("Listening on http://{} ({})", args.listen, args.network);
+    println!("Listening on http://{} ({})", args.listen, args.chain.network);
     // connect_info lets handlers and middleware see the caller's address (for rate limiting).
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
@@ -261,7 +247,7 @@ async fn register_wallet(
     let birthday = req.birthday;
 
     run_blocking(move || {
-        chain::check_birthday(&state.rpc, birthday).map_err(|e| match node_error(&e) {
+        chain::check_birthday(&state.backend, birthday).map_err(|e| match BackendError::find(&e) {
             Some(_) => ApiError::from(e),
             None => ApiError::bad_request(e.to_string()),
         })?;
@@ -489,8 +475,8 @@ async fn build_psbt(
         .map_err(|_| ApiError::bad_request("address is for a different network"))?;
     let amount = Amount::from_sat(req.amount_sat);
 
-    let (draft, fee_rate) = with_wallet(state, id, token, move |w, rpc| {
-        let fee_rate = send::choose_fee_rate(rpc, req.fee_rate_sat_vb)
+    let (draft, fee_rate) = with_wallet(state, id, token, move |w, backend| {
+        let fee_rate = send::choose_fee_rate(backend, req.fee_rate_sat_vb)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let now = Instant::now();
         let reserved = w.reserved.active(now);
@@ -534,17 +520,20 @@ async fn broadcast(
     let psbt = Psbt::from_str(&req.psbt)
         .map_err(|e| ApiError::bad_request(format!("invalid PSBT: {e}")))?;
 
-    let txid = with_wallet(state, id, token, move |w, rpc| {
+    let txid = with_wallet(state, id, token, move |w, backend| {
         let tx = send::finalize(&w.wallet, psbt)
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         let spent: Vec<OutPoint> = spent_coins(&tx).collect();
         let WalletEntry { conn, wallet, reserved, .. } = w;
-        let txid = send::broadcast(wallet, conn, rpc, tx).map_err(|e| match node_error(&e) {
-            // Core answered, but refused the tx (e.g. double-spend, fee too low): client's issue.
-            Some(RpcError::JsonRpc(jsonrpc::Error::Rpc(rejection))) => ApiError::bad_request(
-                format!("Bitcoin Core rejected the transaction: {}", rejection.message),
-            ),
-            _ => e.into(),
+        let txid = send::broadcast(wallet, conn, backend, tx).map_err(|e| {
+            match BackendError::find(&e) {
+                // The backend answered, but refused the tx (e.g. double-spend, fee too low):
+                // the client's issue.
+                Some(BackendError::Rejected(reason)) => ApiError::bad_request(format!(
+                    "the transaction was rejected: {reason}"
+                )),
+                _ => e.into(),
+            }
         })?;
         // BDK now sees these coins as spent, so the reservation has done its job.
         reserved.release(spent);
@@ -594,13 +583,13 @@ impl AppState {
     }
 }
 
-/// Checks `token` against wallet `id`, syncs the wallet with Bitcoin Core, then runs `f` with
+/// Checks `token` against wallet `id`, syncs the wallet with the chain, then runs `f` with
 /// exclusive access to it on a blocking thread.
 async fn with_wallet<T: Send + 'static>(
     state: SharedState,
     id: String,
     token: Bearer,
-    f: impl FnOnce(&mut WalletEntry, &chain::Client) -> Result<T, ApiError> + Send + 'static,
+    f: impl FnOnce(&mut WalletEntry, &Backend) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     run_blocking(move || {
         let entry = state.wallet(&id)?;
@@ -611,13 +600,13 @@ async fn with_wallet<T: Send + 'static>(
             return Err(ApiError::unauthorized("invalid API token"));
         }
         let WalletEntry { conn, wallet, .. } = &mut *entry;
-        chain::sync(wallet, conn, &state.rpc)?;
-        f(&mut entry, &state.rpc)
+        chain::sync(wallet, conn, &state.backend)?;
+        f(&mut entry, &state.backend)
     })
     .await
 }
 
-/// Runs blocking work (BDK, SQLite, Bitcoin Core RPC) off the async runtime's worker threads.
+/// Runs blocking work (BDK, SQLite, chain backend calls) off the async runtime's worker threads.
 async fn run_blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
@@ -650,20 +639,20 @@ impl ApiError {
     }
 }
 
-/// Unexpected failures: 502 if Bitcoin Core is down or erroring (not our fault, and worth
-/// retrying), else 500. Details go to the server log, never to the client, since they can
+/// Unexpected failures: 502 if the chain backend is down or erroring (not our fault, and
+/// worth retrying), else 500. Details go to the server log, never to the client, since they can
 /// include internal paths and state.
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         eprintln!("error: {e:#}");
-        match node_error(&e) {
-            Some(RpcError::JsonRpc(jsonrpc::Error::Transport(_))) => ApiError {
+        match BackendError::find(&e) {
+            Some(BackendError::Unreachable) => ApiError {
                 status: StatusCode::BAD_GATEWAY,
-                message: "Bitcoin Core is unreachable".to_owned(),
+                message: "the chain backend is unreachable".to_owned(),
             },
             Some(_) => ApiError {
                 status: StatusCode::BAD_GATEWAY,
-                message: "Bitcoin Core returned an error".to_owned(),
+                message: "the chain backend returned an error".to_owned(),
             },
             None => ApiError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -671,11 +660,6 @@ impl From<anyhow::Error> for ApiError {
             },
         }
     }
-}
-
-/// The Bitcoin Core RPC error somewhere in `e`'s cause chain, if any.
-fn node_error(e: &anyhow::Error) -> Option<&RpcError> {
-    e.chain().find_map(|cause| cause.downcast_ref::<RpcError>())
 }
 
 /// Malformed or mistyped JSON bodies get our usual `{"error": ...}` shape.

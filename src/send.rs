@@ -9,7 +9,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use bdk_bitcoind_rpc::bitcoincore_rpc::RpcApi;
 use bdk_wallet::bitcoin::bip32::ChildNumber;
 use bdk_wallet::bitcoin::{
     Address, Amount, EcdsaSighashType, FeeRate, OutPoint, Psbt, Transaction, Txid,
@@ -20,31 +19,29 @@ use bdk_wallet::miniscript::descriptor::{KeyMap, KeyMapWrapper};
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Wallet};
 
-use crate::chain::Client;
+use crate::chain::Backend;
 use crate::keys;
 
-/// Aim for confirmation within this many blocks when asking Core for a fee estimate.
+/// Aim for confirmation within this many blocks when asking for a fee estimate.
 const CONF_TARGET: u16 = 6;
 
-/// Used when Core can't estimate fees yet (always the case on a fresh regtest chain).
+/// Used when the backend has no fee estimate (always the case on a fresh regtest chain).
 pub const FALLBACK_FEE_RATE_SAT_VB: u64 = 2;
 
-/// The caller's fee rate if given, else Core's estimate, else the fallback.
-pub fn choose_fee_rate(rpc: &Client, requested_sat_vb: Option<u64>) -> anyhow::Result<FeeRate> {
+/// The caller's fee rate if given, else the backend's estimate, else the fallback.
+pub fn choose_fee_rate(
+    backend: &Backend,
+    requested_sat_vb: Option<u64>,
+) -> anyhow::Result<FeeRate> {
     match requested_sat_vb {
         Some(rate) => FeeRate::from_sat_per_vb(rate).context("fee rate too large"),
-        None => Ok(estimate_fee_rate(rpc)
+        None => Ok(backend
+            .estimate_fee_rate(CONF_TARGET)
+            // Estimates can dip below 1 sat/vB on quiet test networks, and many nodes
+            // won't relay transactions that cheap.
+            .map(|rate| rate.max(FeeRate::BROADCAST_MIN))
             .unwrap_or(FeeRate::from_sat_per_kwu(FALLBACK_FEE_RATE_SAT_VB * 250))),
     }
-}
-
-/// Asks Core for a fee rate. Returns None when Core has no data, which is normal on a fresh
-/// regtest chain: it estimates from how quickly past transactions confirmed.
-fn estimate_fee_rate(rpc: &Client) -> Option<FeeRate> {
-    let estimate = rpc.estimate_smart_fee(CONF_TARGET, None).ok()?;
-    let btc_per_kvb = estimate.fee_rate?;
-    // sat/kvB -> sat/kwu: 1 vbyte = 4 weight units.
-    Some(FeeRate::from_sat_per_kwu(btc_per_kvb.to_sat() / 4))
 }
 
 /// An unsigned transaction plus the numbers the user should check before signing.
@@ -227,15 +224,14 @@ pub fn finalize(wallet: &Wallet, mut psbt: Psbt) -> anyhow::Result<Transaction> 
     Ok(psbt.extract_tx()?)
 }
 
-/// Sends the transaction to Core and records it in the wallet as unconfirmed.
+/// Sends the transaction to the network and records it in the wallet as unconfirmed.
 pub fn broadcast(
     wallet: &mut PersistedWallet<Connection>,
     conn: &mut Connection,
-    rpc: &Client,
+    backend: &Backend,
     tx: Transaction,
 ) -> anyhow::Result<Txid> {
-    // No "rejected" wording here: this also fails when Core is simply unreachable.
-    let txid = rpc.send_raw_transaction(&tx).context("broadcasting transaction")?;
+    let txid = backend.broadcast(&tx)?;
 
     // Record it now so balance/history reflect it immediately, without waiting for a sync.
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

@@ -12,9 +12,8 @@ use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
 use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
 use bitcoin_wallet::client::{self, ApiClient, ApiError};
-use bitcoin_wallet::{
-    chain, default_rpc_url, history, keys, load, parse_network, secret, send, wallet_id,
-};
+use bitcoin_wallet::chain::{self, ChainArgs};
+use bitcoin_wallet::{history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
 
 const MIN_PASSWORD_LEN: usize = 8;
@@ -26,21 +25,8 @@ struct Cli {
     #[arg(long, default_value = "wallet.sqlite")]
     db: PathBuf,
 
-    /// Which chain the wallet lives on: regtest, signet, testnet or testnet4
-    #[arg(long, env = "NETWORK", default_value = "regtest", value_parser = parse_network)]
-    network: Network,
-
-    /// Bitcoin Core RPC URL [default: localhost on the network's default port]
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: Option<String>,
-
-    /// Bitcoin Core RPC username
-    #[arg(long, env = "RPC_USER", default_value = "wallet")]
-    rpc_user: String,
-
-    /// Bitcoin Core RPC password
-    #[arg(long, env = "RPC_PASS", default_value = "wallet", hide_default_value = true)]
-    rpc_pass: String,
+    #[command(flatten)]
+    chain: ChainArgs,
 
     #[command(subcommand)]
     command: Command,
@@ -69,7 +55,7 @@ enum Command {
     Address,
     /// List revealed receive addresses and whether they have been used
     Addresses,
-    /// Sync with Bitcoin Core
+    /// Sync with the chain (Bitcoin Core or Esplora)
     Sync,
     /// Sync, then show confirmed and unconfirmed balance
     Balance,
@@ -81,14 +67,14 @@ enum Command {
         address: String,
         /// Amount in BTC, e.g. 0.5
         amount: String,
-        /// Fee rate in sat/vB (default: ask Bitcoin Core for an estimate)
+        /// Fee rate in sat/vB (default: ask the backend for an estimate)
         #[arg(long)]
         fee_rate: Option<u64>,
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
         /// Let this API server build and broadcast the transaction; we only review and sign.
-        /// Without it, everything happens locally against Bitcoin Core.
+        /// Without it, everything happens locally against the chain backend.
         #[arg(long, env = "WALLET_API")]
         server: Option<String>,
     },
@@ -121,7 +107,7 @@ fn main() -> anyhow::Result<()> {
         Command::Balance => balance(&cli),
         Command::History => history(&cli),
         Command::Send { ref address, ref amount, fee_rate, yes, ref server } => {
-            let (to, amount) = parse_payment(address, amount, cli.network)?;
+            let (to, amount) = parse_payment(address, amount, cli.chain.network)?;
             match server {
                 Some(server) => send_via_server(&cli, server, &to, amount, fee_rate, yes),
                 None => send_local(&cli, &to, amount, fee_rate, yes),
@@ -137,7 +123,7 @@ fn create(cli: &Cli) -> anyhow::Result<()> {
     let db = &cli.db;
     ensure_new(db)?;
     // A brand-new wallet can't have been paid before now, so its birthday is the chain tip.
-    let birthday = chain::tip_height(&connect(cli)?)?;
+    let birthday = cli.chain.connect()?.tip_height()?;
 
     // 128 bits of entropy -> 12 words. Segwitv0 tells BDK which script context the key is for.
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
@@ -146,7 +132,7 @@ fn create(cli: &Cli) -> anyhow::Result<()> {
     let mnemonic = mnemonic.into_key();
 
     let password = new_password()?;
-    let first = init_wallet(db, cli.network, &mnemonic, &password, birthday)?;
+    let first = init_wallet(db, cli.chain.network, &mnemonic, &password, birthday)?;
 
     println!("Wallet created: {}", db.display());
     println!();
@@ -163,7 +149,7 @@ fn restore(cli: &Cli, birthday: Option<u32>) -> anyhow::Result<()> {
     let db = &cli.db;
     ensure_new(db)?;
     if let Some(height) = birthday {
-        chain::check_birthday(&connect(cli)?, height)?;
+        chain::check_birthday(&cli.chain.connect()?, height)?;
     }
 
     // Read with echo off so the words never appear on screen or in shell history.
@@ -174,7 +160,7 @@ fn restore(cli: &Cli, birthday: Option<u32>) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("invalid recovery phrase: {e}"))?;
 
     let password = new_password()?;
-    init_wallet(db, cli.network, &mnemonic, &password, birthday.unwrap_or(0))?;
+    init_wallet(db, cli.chain.network, &mnemonic, &password, birthday.unwrap_or(0))?;
 
     println!("Wallet restored: {}", db.display());
     if birthday.is_none() {
@@ -187,7 +173,7 @@ fn restore(cli: &Cli, birthday: Option<u32>) -> anyhow::Result<()> {
 }
 
 fn export(cli: &Cli) -> anyhow::Result<()> {
-    let (_, wallet) = load(&cli.db, cli.network)?;
+    let (_, wallet) = load(&cli.db, cli.chain.network)?;
     // Public descriptors only: anyone holding these can watch the wallet, but not spend.
     println!("external: {}", wallet.public_descriptor(KeychainKind::External));
     println!("internal: {}", wallet.public_descriptor(KeychainKind::Internal));
@@ -195,7 +181,7 @@ fn export(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn register(cli: &Cli, server: &str) -> anyhow::Result<()> {
-    let (conn, wallet) = load(&cli.db, cli.network)?;
+    let (conn, wallet) = load(&cli.db, cli.chain.network)?;
     // Only public descriptors leave this machine.
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
@@ -229,10 +215,10 @@ fn status_of(e: &anyhow::Error) -> Option<u16> {
 }
 
 fn address(cli: &Cli) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
     // Sync first so indexes already paid to on chain count as used; otherwise a restored or
     // stale wallet would hand out an address that was already used (address reuse).
-    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    chain::sync(&mut wallet, &mut conn, &cli.chain.connect()?)?;
     let next = wallet.reveal_next_address(KeychainKind::External);
     wallet.persist(&mut conn).context("saving wallet")?;
 
@@ -241,9 +227,9 @@ fn address(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn addresses(cli: &Cli) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
     // Sync first: "used" means a transaction paying to it has been seen on chain or in the mempool.
-    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    chain::sync(&mut wallet, &mut conn, &cli.chain.connect()?)?;
 
     let addresses = history::receive_addresses(&wallet);
     if addresses.is_empty() {
@@ -256,18 +242,18 @@ fn addresses(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn sync(cli: &Cli) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
-    let summary = chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    let summary = chain::sync(&mut wallet, &mut conn, &cli.chain.connect()?)?;
     println!(
-        "Synced: scanned {} new block(s), tip at height {}",
-        summary.blocks_scanned, summary.tip_height
+        "Synced: scanned {}, tip at height {}",
+        summary.scanned, summary.tip_height
     );
     Ok(())
 }
 
 fn balance(cli: &Cli) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
-    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    chain::sync(&mut wallet, &mut conn, &cli.chain.connect()?)?;
 
     let b = wallet.balance();
     println!("Confirmed:   {}", b.confirmed);
@@ -281,8 +267,8 @@ fn balance(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn history(cli: &Cli) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
-    chain::sync(&mut wallet, &mut conn, &connect(cli)?)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    chain::sync(&mut wallet, &mut conn, &cli.chain.connect()?)?;
 
     let txs = history::transactions(&wallet);
     if txs.is_empty() {
@@ -305,13 +291,13 @@ fn history(cli: &Cli) -> anyhow::Result<()> {
 
 fn status(cli: &Cli, txid: &str, watch: bool, until: u32, interval: u64) -> anyhow::Result<()> {
     let txid = Txid::from_str(txid).context("invalid txid")?;
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
-    let rpc = connect(cli)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    let backend = cli.chain.connect()?;
 
     let mut last_printed = None;
     loop {
         // Each sync only fetches blocks we haven't seen, so polling like this is cheap.
-        chain::sync(&mut wallet, &mut conn, &rpc)?;
+        chain::sync(&mut wallet, &mut conn, &backend)?;
         let Some(tx) = history::transaction(&wallet, txid) else {
             bail!("{txid} not found: not a wallet transaction, or dropped from the mempool");
         };
@@ -343,7 +329,7 @@ fn parse_payment(
     Ok((to, amount))
 }
 
-/// Builds, signs and broadcasts everything locally, talking straight to Bitcoin Core.
+/// Builds, signs and broadcasts everything locally, talking straight to the chain backend.
 fn send_local(
     cli: &Cli,
     to: &Address,
@@ -351,11 +337,11 @@ fn send_local(
     fee_rate: Option<u64>,
     yes: bool,
 ) -> anyhow::Result<()> {
-    let (mut conn, mut wallet) = load(&cli.db, cli.network)?;
-    let rpc = connect(cli)?;
-    chain::sync(&mut wallet, &mut conn, &rpc)?;
+    let (mut conn, mut wallet) = load(&cli.db, cli.chain.network)?;
+    let backend = cli.chain.connect()?;
+    chain::sync(&mut wallet, &mut conn, &backend)?;
 
-    let fee_rate = send::choose_fee_rate(&rpc, fee_rate)?;
+    let fee_rate = send::choose_fee_rate(&backend, fee_rate)?;
     let draft = send::build(&mut wallet, to, amount, fee_rate, &[])?;
     print_summary(to, amount, draft.fee, draft.change, draft.inputs);
 
@@ -369,10 +355,10 @@ fn send_local(
     let mut psbt = draft.psbt;
     send::sign(&wallet, &mnemonic, &mut psbt)?;
     let tx = send::finalize(&wallet, psbt)?;
-    let txid = send::broadcast(&mut wallet, &mut conn, &rpc, tx)?;
+    let txid = send::broadcast(&mut wallet, &mut conn, &backend, tx)?;
 
     println!("Broadcast: {txid}");
-    println!("Status: unconfirmed. {}", confirm_hint(cli.network));
+    println!("Status: unconfirmed. {}", confirm_hint(cli.chain.network));
     Ok(())
 }
 
@@ -386,7 +372,7 @@ fn send_via_server(
     fee_rate: Option<u64>,
     yes: bool,
 ) -> anyhow::Result<()> {
-    let (conn, wallet) = load(&cli.db, cli.network)?;
+    let (conn, wallet) = load(&cli.db, cli.chain.network)?;
     let token = client::load_token(&conn, server)?.with_context(|| {
         format!("this wallet isn't registered with {server}; run `register --server {server}` first")
     })?;
@@ -421,7 +407,7 @@ fn send_via_server(
     let response = api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() })?;
 
     println!("Broadcast: {}", response.txid);
-    println!("Status: unconfirmed. {}", confirm_hint(cli.network));
+    println!("Status: unconfirmed. {}", confirm_hint(cli.chain.network));
     Ok(())
 }
 
@@ -450,11 +436,6 @@ fn confirm(question: &str) -> anyhow::Result<bool> {
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
-}
-
-fn connect(cli: &Cli) -> anyhow::Result<chain::Client> {
-    let url = cli.rpc_url.clone().unwrap_or_else(|| default_rpc_url(cli.network));
-    chain::connect(&url, &cli.rpc_user, &cli.rpc_pass, cli.network)
 }
 
 /// What to do to get a new transaction confirmed.

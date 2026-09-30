@@ -58,7 +58,23 @@ cargo run -- status <txid> --watch
 | `send ADDRESS BTC [--server URL]` | yes | Build, review, sign and broadcast |
 | `status TXID [--watch --until N]` | no | Confirmation status, or poll until N confirmations |
 
-Global options: `--db` (default `wallet.sqlite`), plus `--rpc-url`, `--rpc-user` and `--rpc-pass`, which can also be set with the `RPC_URL`, `RPC_USER` and `RPC_PASS` environment variables.
+Global options (each can also be set with the environment variable in brackets):
+
+- `--db` (default `wallet.sqlite`)
+- `--network` [`NETWORK`]: `regtest` (default), `testnet4`, `testnet` or `signet`. Mainnet is refused for now. A wallet only opens on the network it was created for.
+- `--backend` [`BACKEND`]: `core` or `esplora`. Defaults to `core` on regtest and `esplora` elsewhere.
+- `--esplora-url` [`ESPLORA_URL`]: defaults to mempool.space (testnet4, signet) or blockstream.info (testnet).
+- `--rpc-url`, `--rpc-user`, `--rpc-pass` [`RPC_URL`, `RPC_USER`, `RPC_PASS`]: for `--backend core`. The URL defaults to localhost on the network's port.
+
+On testnet4 with no node of your own:
+
+```bash
+export NETWORK=testnet4
+cargo run -- create      # then get coins from a testnet4 faucet
+cargo run -- balance     # syncs through mempool.space
+```
+
+Esplora looks up the wallet's addresses directly (a full scan up to 20 unused addresses per keychain), so there's no node to run and the birthday isn't used. The Esplora server does learn which addresses are yours.
 
 ## API server
 
@@ -88,10 +104,10 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
   - `404`: unknown wallet or endpoint
   - `409`: wallet already registered
   - `429`: rate limit hit; the `Retry-After` header says how many seconds to wait
-  - `502`: Bitcoin Core unreachable or failing
+  - `502`: chain backend (Bitcoin Core or Esplora) unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
-Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same RPC options as the CLI.
+Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network.
 
 ## Security model
 
@@ -126,7 +142,7 @@ cargo test -- --ignored           # end-to-end: real server + regtest, full non-
 src/lib.rs          shared: parse_network(), load(), wallet_id(), confirmations()
 src/keys.rs         mnemonic → BIP84 descriptors and keys
 src/secret.rs       encrypted mnemonic storage
-src/chain.rs        Bitcoin Core RPC and sync
+src/chain.rs        chain backends (Core RPC, Esplora) and sync
 src/history.rs      transaction and address views
 src/send.rs         build → review → sign → finalize → broadcast
 src/api.rs          JSON types shared by the server and the client
