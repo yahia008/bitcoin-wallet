@@ -39,24 +39,32 @@ fn non_custodial_send_flow() {
     let internal = local.public_descriptor(KeychainKind::Internal).to_string();
 
     let server = Server::start();
-    let api = ApiClient::new(&server.url);
 
     // Register: the server gets public descriptors only, and computes the same id we do.
-    let id = api.register(&RegisterRequest { external: external.clone(), internal: internal.clone() })
-        .unwrap()
-        .id;
+    let register = RegisterRequest { external: external.clone(), internal: internal.clone() };
+    let registration = ApiClient::new(&server.url).register(&register).unwrap();
+    let (id, token) = (registration.id, registration.token);
     assert_eq!(id, wallet_id(&external, &internal));
+    let api = ApiClient::new(&server.url).with_token(&token);
     let wallet_url = format!("{}/wallets/{id}", server.url);
 
+    // Auth. The token is issued once: descriptors aren't secret, so registering again is 409.
+    assert_eq!(api_status(ApiClient::new(&server.url).register(&register)), 409);
+    let balance_url = format!("{wallet_url}/balance");
+    assert_eq!(http_status("GET", &balance_url, None), 401, "no token");
+    assert_eq!(http_status("GET", &balance_url, Some(&"00".repeat(32))), 401, "wrong token");
+    let other = other_wallet_token(&server.url);
+    assert_eq!(http_status("GET", &balance_url, Some(&other)), 401, "another wallet's token");
+
     // Receive 1 BTC and confirm it.
-    let address = http("POST", &format!("{wallet_url}/addresses"))["address"]
+    let address = http("POST", &format!("{wallet_url}/addresses"), &token)["address"]
         .as_str()
         .unwrap()
         .to_owned();
     let address = Address::from_str(&address).unwrap().require_network(NETWORK).unwrap();
     funder.send_to_address(&address, Amount::ONE_BTC, None, None, None, None, None, None).unwrap();
     mine(&funder, 1);
-    assert_eq!(http("GET", &format!("{wallet_url}/balance"))["confirmed_sat"], 100_000_000);
+    assert_eq!(http("GET", &format!("{wallet_url}/balance"), &token)["confirmed_sat"], 100_000_000);
 
     // Send 0.3 BTC: server builds, we review and sign, server broadcasts.
     let dest = funder.get_new_address(None, None).unwrap().require_network(NETWORK).unwrap();
@@ -83,9 +91,9 @@ fn non_custodial_send_flow() {
 
     // Confirmation tracking.
     let tx_url = format!("{wallet_url}/transactions/{txid}");
-    assert_eq!(http("GET", &tx_url)["confirmations"], 0);
+    assert_eq!(http("GET", &tx_url, &token)["confirmations"], 0);
     mine(&funder, 1);
-    let tx = http("GET", &tx_url);
+    let tx = http("GET", &tx_url, &token);
     assert_eq!(tx["confirmations"], 1);
     assert_eq!(tx["net_sat"], -((amount + review.fee).to_sat() as i64));
 
@@ -140,12 +148,53 @@ fn mine(funder: &Client, blocks: u64) {
 }
 
 /// Minimal JSON request helper for endpoints `ApiClient` doesn't wrap.
-fn http(method: &str, url: &str) -> Value {
-    let response = match method {
-        "GET" => ureq::get(url).call(),
-        _ => ureq::post(url).send_empty(),
+fn http(method: &str, url: &str, token: &str) -> Value {
+    request(method, url, Some(token)).unwrap().body_mut().read_json().unwrap()
+}
+
+/// The error status of a request that's expected to fail.
+fn http_status(method: &str, url: &str, token: Option<&str>) -> u16 {
+    match request(method, url, token) {
+        Err(ureq::Error::StatusCode(status)) => status,
+        other => panic!("expected an error status, got {other:?}"),
+    }
+}
+
+fn request(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    let auth = token.map(|token| format!("Bearer {token}"));
+    match method {
+        "GET" => {
+            let mut request = ureq::get(url);
+            if let Some(auth) = &auth {
+                request = request.header("Authorization", auth);
+            }
+            request.call()
+        }
+        _ => {
+            let mut request = ureq::post(url);
+            if let Some(auth) = &auth {
+                request = request.header("Authorization", auth);
+            }
+            request.send_empty()
+        }
+    }
+}
+
+/// Registers a second, unrelated wallet and returns its token.
+fn other_wallet_token(server_url: &str) -> String {
+    let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
+        Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
+    let (ext, int) = keys::descriptors(&mnemonic.into_key()).unwrap();
+    let wallet = Wallet::create(ext, int).network(NETWORK).create_wallet_no_persist().unwrap();
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
     };
-    response.unwrap().body_mut().read_json().unwrap()
+    ApiClient::new(server_url).register(&request).unwrap().token
 }
 
 fn api_status<T>(result: anyhow::Result<T>) -> u16 {

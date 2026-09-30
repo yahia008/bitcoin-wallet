@@ -11,7 +11,7 @@ use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{AddressInfo, KeychainKind, Wallet};
 use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
-use bitcoin_wallet::client::{ApiClient, ApiError};
+use bitcoin_wallet::client::{self, ApiClient, ApiError};
 use bitcoin_wallet::{NETWORK, chain, history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
 
@@ -173,15 +173,36 @@ fn export(db: &Path) -> anyhow::Result<()> {
 }
 
 fn register(db: &Path, server: &str) -> anyhow::Result<()> {
-    let (_, wallet) = load(db)?;
+    let (conn, wallet) = load(db)?;
     // Only public descriptors leave this machine.
     let request = RegisterRequest {
         external: wallet.public_descriptor(KeychainKind::External).to_string(),
         internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
     };
-    let response = ApiClient::new(server).register(&request)?;
+    let response = match ApiClient::new(server).register(&request) {
+        Ok(response) => response,
+        Err(e) if status_of(&e) == Some(409) => {
+            if client::load_token(&conn, server)?.is_some() {
+                println!("Already registered with {server}.");
+                return Ok(());
+            }
+            // The server only hands out a token once, so we can't get it again.
+            return Err(e.context(
+                "already registered with this server, but this wallet has no token for it \
+                 (registered from another copy of the wallet?)",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    client::save_token(&conn, server, &response.token)?;
     println!("Registered with {server} as wallet {}", response.id);
+    println!("API token (saved in {}; only needed for calling the API directly):", db.display());
+    println!("  {}", response.token);
     Ok(())
+}
+
+fn status_of(e: &anyhow::Error) -> Option<u16> {
+    e.downcast_ref::<ApiError>().map(|e| e.status)
 }
 
 fn address(cli: &Cli) -> anyhow::Result<()> {
@@ -339,7 +360,10 @@ fn send_via_server(
     yes: bool,
 ) -> anyhow::Result<()> {
     let (conn, wallet) = load(db)?;
-    let api = ApiClient::new(server);
+    let token = client::load_token(&conn, server)?.with_context(|| {
+        format!("this wallet isn't registered with {server}; run `register --server {server}` first")
+    })?;
+    let api = ApiClient::new(server).with_token(token);
     let id = wallet_id(
         &wallet.public_descriptor(KeychainKind::External).to_string(),
         &wallet.public_descriptor(KeychainKind::Internal).to_string(),
@@ -347,13 +371,10 @@ fn send_via_server(
 
     let request =
         PsbtRequest { address: to.to_string(), amount_sat: amount.to_sat(), fee_rate_sat_vb: fee_rate };
-    let response = api.build_psbt(&id, &request).map_err(|e| {
-        match e.downcast_ref::<ApiError>() {
-            Some(api_error) if api_error.status == 404 => {
-                e.context("this wallet isn't registered; run `register --server <url>` first")
-            }
-            _ => e,
-        }
+    let response = api.build_psbt(&id, &request).map_err(|e| match status_of(&e) {
+        Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
+        Some(401) => e.context("the server rejected this wallet's API token"),
+        _ => e,
     })?;
     let mut psbt = Psbt::from_str(&response.psbt).context("server returned an invalid PSBT")?;
 

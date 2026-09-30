@@ -63,14 +63,14 @@ Global options: `--db` (default `wallet.sqlite`), plus `--rpc-url`, `--rpc-user`
 
 ```bash
 cargo run --bin server                                   # listens on 127.0.0.1:3000
-cargo run -- register --server http://127.0.0.1:3000
+cargo run -- register --server http://127.0.0.1:3000   # saves (and prints) an API token
 cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 ```
 
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
 | GET | `/health` | | `{"status":"ok"}` |
-| POST | `/wallets` | `{external, internal}` public descriptors | `201`/`200` `{id}` |
+| POST | `/wallets` | `{external, internal}` public descriptors | `201` `{id, token}` (`409` if already registered) |
 | GET | `/wallets/{id}/balance` | | `{confirmed_sat, unconfirmed_sat, immature_sat, total_sat}` |
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
@@ -79,10 +79,13 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?}` | unsigned PSBT (base64) + summary |
 | POST | `/wallets/{id}/broadcast` | `{psbt}` signed PSBT (base64) | `{txid}` |
 
+- **Auth:** every `/wallets/{id}/...` request needs `Authorization: Bearer <token>`. The token is returned once, at registration; the server stores only its SHA-256 hash.
 - **Amounts** are integer satoshis.
 - **Errors** are always `{"error": "..."}`:
   - `400` / `415` / `422`: bad input
+  - `401`: missing or wrong API token
   - `404`: unknown wallet or endpoint
+  - `409`: wallet already registered
   - `502`: Bitcoin Core unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
@@ -103,7 +106,8 @@ CLI (your machine)                         API server (watch-only)          Bitc
 - **The server stores public descriptors only.** It rejects any descriptor containing a private key. If the server is compromised, an attacker can see balances but can't spend.
 - **The CLI verifies every server-built PSBT before signing** (`send::review`). The recipient must get exactly the requested amount, and every other output must be the wallet's own change: the CLI derives the change script itself and compares. Input values are checked against the previous transactions' hashes, so a faked input value can't hide a large fee. Only `SIGHASH_ALL` is accepted.
 - **On disk,** the mnemonic is encrypted in `wallet.sqlite`. It's decrypted only while signing, and the wallet database otherwise holds only public data.
-- **No authentication yet:** anyone who can reach the API and knows a wallet id can read that wallet's balance and addresses. Keep the server on `127.0.0.1` (the default).
+- **Per-wallet API tokens.** Without its token nobody can read a wallet, reveal addresses or build PSBTs (which would reserve its coins). Registering is one-shot, since descriptors aren't secret: a second registration gets `409`, never the token. A lost token can't be recovered yet; the server admin has to delete the wallet from `--data-dir` so it can be registered again. Wallets registered before tokens existed must be re-registered the same way.
+- **No TLS yet,** so tokens travel in plain text. Keep the server on `127.0.0.1` (the default).
 
 ## Tests
 

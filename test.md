@@ -22,7 +22,7 @@ cargo test -- --include-ignored  # 15 tests: the 14 above plus the end-to-end re
 | `secret::tests::*` | The mnemonic is encrypted, a wrong password is rejected, and the plaintext is never stored |
 | `send::tests::*` | `review` accepts an honest PSBT and rejects tampered ones: a changed amount, redirected change, an extra output, a weak sighash, a faked input value, a missing previous transaction |
 | `api` tests | The server accepts public descriptors and rejects private ones and garbage |
-| `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, fund, build the PSBT, review, sign, broadcast, confirm |
+| `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, token auth (missing, wrong, other wallet's, re-register), fund, build the PSBT, review, sign, broadcast, confirm, coin reservations |
 
 Every test should report `ok`.
 
@@ -135,16 +135,20 @@ Also try: a wrong word, or the words in the wrong order. It should fail with "in
 cargo run -q --bin server
 
 # Terminal B
-bw register --server http://127.0.0.1:3000      # sends public descriptors only; prints the wallet id
-curl -s localhost:3000/wallets/<id>/balance
-curl -s localhost:3000/wallets/<id>/addresses
-curl -s localhost:3000/wallets/<id>/transactions
+bw register --server http://127.0.0.1:3000      # sends public descriptors only; prints id + token
+TOKEN=<token printed by register>
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/wallets/<id>/balance
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/wallets/<id>/addresses
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/wallets/<id>/transactions
 bw send --server http://127.0.0.1:3000 $(bcli -rpcwallet=miner getnewaddress) 0.1
 mine
 ```
 Expect: `Verified the server's PSBT: pays exactly the recipient…`. The server built the transaction, but signing happened in the CLI.
 
-Also try: `send --server` with a wallet that isn't registered. It should tell you to run `register` first.
+Also try:
+- `send --server` with a wallet that isn't registered. It should tell you to run `register` first.
+- `curl` without the header, or with a made-up token: `401`.
+- `register` a second time: `Already registered`. The server answers `409` and never hands out the token again.
 
 ---
 

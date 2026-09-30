@@ -10,16 +10,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Path, State};
+use axum::extract::{FromRequest, FromRequestParts, Path, State};
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Error as RpcError, jsonrpc};
 use bdk_wallet::bitcoin::{Address, Amount, OutPoint, Psbt, Transaction, Txid};
+use bdk_wallet::bitcoin::hashes::{Hash, sha256};
+use bdk_wallet::bitcoin::hex::DisplayHex;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
-use bdk_wallet::rusqlite::Connection;
+use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use bitcoin_wallet::api::{
     BroadcastRequest, BroadcastResponse, ErrorBody, PsbtRequest, PsbtResponse, RegisterRequest,
@@ -27,6 +31,7 @@ use bitcoin_wallet::api::{
 };
 use bitcoin_wallet::send::{self, BuildError};
 use bitcoin_wallet::{NETWORK, chain, history, load, wallet_id};
+use chacha20poly1305::aead::Generate;
 use clap::Parser;
 use serde::Serialize;
 
@@ -61,6 +66,8 @@ struct WalletEntry {
     conn: Connection,
     wallet: PersistedWallet<Connection>,
     reserved: Reservations,
+    /// SHA-256 of the wallet's API token. The token itself is never stored.
+    token_hash: sha256::Hash,
 }
 
 /// Coins picked for PSBTs that were handed out but not broadcast yet. BDK only learns a coin
@@ -149,8 +156,8 @@ async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-/// Registers a watch-only wallet. Idempotent: the id is derived from the descriptors, so
-/// registering the same wallet again returns the same id with 200 instead of 201.
+/// Registers a watch-only wallet and returns its API token. The token is shown only here, once:
+/// descriptors aren't secret, so registering an existing wallet again gets 409, never a token.
 async fn register_wallet(
     State(state): State<SharedState>,
     ApiJson(req): ApiJson<RegisterRequest>,
@@ -166,22 +173,81 @@ async fn register_wallet(
 
     run_blocking(move || {
         let db = state.db_path(&id);
-        if db.exists() {
-            return Ok((StatusCode::OK, Json(RegisterResponse { id })));
+        // create_new claims the file atomically, so two concurrent registrations can't both
+        // win (and the loser's cleanup below only ever deletes a file it created).
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&db) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ApiError::conflict("wallet already registered"));
+            }
+            Err(e) => return Err(anyhow::Error::from(e).into()),
         }
-        let mut conn = Connection::open(&db)?;
-        let created = Wallet::create(external, internal)
-            .network(NETWORK)
-            .create_wallet(&mut conn);
-        if let Err(e) = created {
-            drop(conn);
+
+        let token = new_token();
+        let result = create_wallet(&db, external, internal, &token);
+        if result.is_err() {
             let _ = std::fs::remove_file(&db);
-            // e.g. mainnet xpub on a regtest server.
-            return Err(ApiError::bad_request(format!("invalid wallet: {e}")));
         }
-        Ok((StatusCode::CREATED, Json(RegisterResponse { id })))
+        result?;
+        Ok((StatusCode::CREATED, Json(RegisterResponse { id, token })))
     })
     .await
+}
+
+/// Writes the wallet and its token hash to `db` in one SQLite transaction.
+fn create_wallet(
+    db: &std::path::Path,
+    external: String,
+    internal: String,
+    token: &str,
+) -> Result<(), ApiError> {
+    let mut conn = Connection::open(db)?;
+    let mut tx = conn.transaction()?;
+    Wallet::create(external, internal)
+        .network(NETWORK)
+        .create_wallet(&mut tx)
+        // e.g. mainnet xpub on a regtest server.
+        .map_err(|e| ApiError::bad_request(format!("invalid wallet: {e}")))?;
+    tx.execute(
+        "CREATE TABLE api_token (id INTEGER PRIMARY KEY CHECK (id = 0), hash BLOB NOT NULL)",
+        [],
+    )?;
+    tx.execute(
+        "INSERT INTO api_token (id, hash) VALUES (0, ?1)",
+        params![token_hash(token).as_byte_array()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 256 random bits, hex-encoded.
+fn new_token() -> String {
+    <[u8; 32]>::generate().to_lower_hex_string()
+}
+
+/// Tokens are 256 random bits, so unlike passwords there's nothing to brute-force and a fast
+/// hash is enough. Storing only the hash means a leaked database doesn't leak working tokens.
+fn token_hash(token: &str) -> sha256::Hash {
+    sha256::Hash::hash(token.as_bytes())
+}
+
+/// The token from an `Authorization: Bearer <token>` header. Every per-wallet route takes one.
+struct Bearer(String);
+
+impl<S: Send + Sync> FromRequestParts<S> for Bearer {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(|token| Bearer(token.trim().to_owned()))
+            .ok_or_else(|| {
+                ApiError::unauthorized("missing API token: send `Authorization: Bearer <token>`")
+            })
+    }
 }
 
 /// Parses a descriptor and rejects it if it contains any private key.
@@ -210,8 +276,9 @@ struct BalanceResponse {
 async fn balance(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
 ) -> Result<Json<BalanceResponse>, ApiError> {
-    let balance = with_wallet(state, id, |w, _| Ok(w.wallet.balance())).await?;
+    let balance = with_wallet(state, id, token, |w, _| Ok(w.wallet.balance())).await?;
     Ok(Json(BalanceResponse {
         confirmed_sat: balance.confirmed.to_sat(),
         // trusted_pending = our own unconfirmed change; untrusted_pending = incoming from others.
@@ -232,10 +299,11 @@ struct AddressResponse {
 async fn new_address(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
 ) -> Result<(StatusCode, Json<AddressResponse>), ApiError> {
     // Sync first so indexes already paid to on chain count as used; otherwise a fresh or
     // stale wallet would hand out an address that was already used (address reuse).
-    let info = with_wallet(state, id, |w, _| {
+    let info = with_wallet(state, id, token, |w, _| {
         let info = w.wallet.reveal_next_address(KeychainKind::External);
         w.wallet.persist(&mut w.conn).map_err(anyhow::Error::from)?;
         Ok(info)
@@ -249,9 +317,10 @@ async fn new_address(
 async fn list_addresses(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
 ) -> Result<Json<Vec<AddressResponse>>, ApiError> {
     let addresses =
-        with_wallet(state, id, |w, _| Ok(history::receive_addresses(&w.wallet))).await?;
+        with_wallet(state, id, token, |w, _| Ok(history::receive_addresses(&w.wallet))).await?;
     Ok(Json(
         addresses
             .into_iter()
@@ -288,8 +357,9 @@ impl From<history::TxSummary> for TransactionResponse {
 async fn list_transactions(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
 ) -> Result<Json<Vec<TransactionResponse>>, ApiError> {
-    let txs = with_wallet(state, id, |w, _| Ok(history::transactions(&w.wallet))).await?;
+    let txs = with_wallet(state, id, token, |w, _| Ok(history::transactions(&w.wallet))).await?;
     Ok(Json(txs.into_iter().map(Into::into).collect()))
 }
 
@@ -297,9 +367,10 @@ async fn list_transactions(
 async fn get_transaction(
     State(state): State<SharedState>,
     Path((id, txid)): Path<(String, String)>,
+    token: Bearer,
 ) -> Result<Json<TransactionResponse>, ApiError> {
     let txid = Txid::from_str(&txid).map_err(|_| ApiError::bad_request("invalid txid"))?;
-    let tx = with_wallet(state, id, move |w, _| {
+    let tx = with_wallet(state, id, token, move |w, _| {
         history::transaction(&w.wallet, txid).ok_or_else(|| {
             ApiError::not_found("transaction not found: not a wallet transaction, or dropped from the mempool")
         })
@@ -313,6 +384,7 @@ async fn get_transaction(
 async fn build_psbt(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
     ApiJson(req): ApiJson<PsbtRequest>,
 ) -> Result<Json<PsbtResponse>, ApiError> {
     let to = Address::from_str(&req.address)
@@ -321,7 +393,7 @@ async fn build_psbt(
         .map_err(|_| ApiError::bad_request("address is for a different network"))?;
     let amount = Amount::from_sat(req.amount_sat);
 
-    let (draft, fee_rate) = with_wallet(state, id, move |w, rpc| {
+    let (draft, fee_rate) = with_wallet(state, id, token, move |w, rpc| {
         let fee_rate = send::choose_fee_rate(rpc, req.fee_rate_sat_vb)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let now = Instant::now();
@@ -360,16 +432,17 @@ async fn build_psbt(
 async fn broadcast(
     State(state): State<SharedState>,
     Path(id): Path<String>,
+    token: Bearer,
     ApiJson(req): ApiJson<BroadcastRequest>,
 ) -> Result<Json<BroadcastResponse>, ApiError> {
     let psbt = Psbt::from_str(&req.psbt)
         .map_err(|e| ApiError::bad_request(format!("invalid PSBT: {e}")))?;
 
-    let txid = with_wallet(state, id, move |w, rpc| {
+    let txid = with_wallet(state, id, token, move |w, rpc| {
         let tx = send::finalize(&w.wallet, psbt)
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         let spent: Vec<OutPoint> = spent_coins(&tx).collect();
-        let WalletEntry { conn, wallet, reserved } = w;
+        let WalletEntry { conn, wallet, reserved, .. } = w;
         let txid = send::broadcast(wallet, conn, rpc, tx).map_err(|e| match node_error(&e) {
             // Core answered, but refused the tx (e.g. double-spend, fee too low): client's issue.
             Some(RpcError::JsonRpc(jsonrpc::Error::Rpc(rejection))) => ApiError::bad_request(
@@ -407,23 +480,40 @@ impl AppState {
             return Err(ApiError::not_found("wallet not found"));
         }
         let (conn, wallet) = load(&db)?;
+        let token_hash = conn
+            .query_row("SELECT hash FROM api_token WHERE id = 0", [], |row| row.get::<_, Vec<u8>>(0))
+            .optional()
+            .map_err(anyhow::Error::from)?
+            .and_then(|hash| sha256::Hash::from_slice(&hash).ok())
+            .ok_or_else(|| {
+                // Registered before tokens existed, so nobody holds a token for it.
+                ApiError::unauthorized(
+                    "wallet has no API token; delete it from the server's data dir and register again",
+                )
+            })?;
         let reserved = Reservations::default();
-        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved }));
+        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, token_hash }));
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
     }
 }
 
-/// Syncs wallet `id` with Bitcoin Core, then runs `f` with exclusive access to it on a
-/// blocking thread.
+/// Checks `token` against wallet `id`, syncs the wallet with Bitcoin Core, then runs `f` with
+/// exclusive access to it on a blocking thread.
 async fn with_wallet<T: Send + 'static>(
     state: SharedState,
     id: String,
+    token: Bearer,
     f: impl FnOnce(&mut WalletEntry, &chain::Client) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     run_blocking(move || {
         let entry = state.wallet(&id)?;
         let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
+        // Comparing hashes, not tokens: an early-exit compare can only leak how much of the
+        // hash matched, which doesn't help anyone find a token that produces it.
+        if token_hash(&token.0) != entry.token_hash {
+            return Err(ApiError::unauthorized("invalid API token"));
+        }
         let WalletEntry { conn, wallet, .. } = &mut *entry;
         chain::sync(wallet, conn, &state.rpc)?;
         f(&mut entry, &state.rpc)
@@ -451,8 +541,16 @@ impl ApiError {
         ApiError { status: StatusCode::BAD_REQUEST, message: message.into() }
     }
 
+    fn unauthorized(message: impl Into<String>) -> Self {
+        ApiError { status: StatusCode::UNAUTHORIZED, message: message.into() }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         ApiError { status: StatusCode::NOT_FOUND, message: message.into() }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        ApiError { status: StatusCode::CONFLICT, message: message.into() }
     }
 }
 
@@ -542,6 +640,15 @@ mod tests {
     fn rejects_garbage() {
         let err = public_descriptor("wpkh(not-a-key)").err().unwrap();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn tokens_are_random_and_stored_hashed() {
+        let (a, b) = (new_token(), new_token());
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, b);
+        assert_eq!(token_hash(&a), token_hash(&a));
+        assert_ne!(token_hash(&a), token_hash(&b));
     }
 
     fn coin(vout: u32) -> OutPoint {

@@ -100,9 +100,11 @@ cargo run -q -- --db restored.sqlite history           # same transactions
 cargo run -q --bin server
 
 # Terminal B:
-bw register --server http://127.0.0.1:3000             # sends public keys only
-curl -s localhost:3000/wallets/<id>/balance
-curl -s localhost:3000/wallets/<id>/transactions
+bw register --server http://127.0.0.1:3000             # sends public keys only; prints id + token
+TOKEN=<token printed by register>
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/wallets/<id>/balance
+curl -s -H "Authorization: Bearer $TOKEN" localhost:3000/wallets/<id>/transactions
+curl -s localhost:3000/wallets/<id>/balance            # no token: 401
 bw send --server http://127.0.0.1:3000 $(bcli -rpcwallet=miner getnewaddress) 0.1
 ```
 

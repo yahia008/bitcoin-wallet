@@ -15,6 +15,9 @@ pub struct RegisterRequest {
 #[derive(Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub id: String,
+    /// Send as `Authorization: Bearer <token>` on every `/wallets/{id}/...` request. Returned
+    /// only once, at registration; the server keeps just a hash of it.
+    pub token: String,
 }
 
 #[derive(Serialize, Deserialize)]
