@@ -17,7 +17,7 @@ It currently runs on **regtest** only.
 - Transaction history with fees and confirmation counts
 - Coin selection, fee estimation, PSBT signing and broadcast
 - Confirmation tracking (`status --watch`, or polling the API)
-- Mnemonic encrypted at rest (Argon2id + XChaCha20-Poly1305); wallet state in SQLite
+- Only the account key (m/84'/1'/0') is kept, encrypted at rest (Argon2id + XChaCha20-Poly1305); the mnemonic is never stored. Wallet state in SQLite
 
 ## Quick start
 
@@ -46,7 +46,7 @@ cargo run -- status <txid> --watch
 
 | Command | Needs password | What it does |
 |---|---|---|
-| `create` | sets one | New wallet from a freshly generated mnemonic; its birthday is the current chain tip, so Core must be running |
+| `create` | sets one | New wallet from a freshly generated mnemonic; its birthday is the current chain tip, so the chain backend must be reachable |
 | `restore [--birthday H]` | sets one | Restore from an existing mnemonic (entered at a hidden prompt). Without `--birthday` the first sync scans from genesis; if unsure, pick an earlier height, since coins received before the birthday won't be found |
 | `export` | no | Print the public descriptors |
 | `register --server URL` | no | Register the public descriptors with an API server |
@@ -112,8 +112,8 @@ Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-
 ## Security model
 
 ```
-CLI (your machine)                         API server (watch-only)          Bitcoin Core
- mnemonic, encrypted with your password     tpub descriptors only
+CLI (your machine)                         API server (watch-only)          Core or Esplora
+ account tprv, encrypted with your password tpub descriptors only
  ── POST /psbt {address, amount} ────────►  picks coins, fee, change
  ◄──────────── unsigned PSBT ─────────────
  review() ← verify, don't trust the server
@@ -123,7 +123,7 @@ CLI (your machine)                         API server (watch-only)          Bitc
 
 - **The server stores public descriptors only.** It rejects any descriptor containing a private key. If the server is compromised, an attacker can see balances but can't spend.
 - **The CLI verifies every server-built PSBT before signing** (`send::review`). The recipient must get exactly the requested amount, and every other output must be the wallet's own change: the CLI derives the change script itself and compares. Input values are checked against the previous transactions' hashes, so a faked input value can't hide a large fee. Only `SIGHASH_ALL` is accepted.
-- **On disk,** the mnemonic is encrypted in `wallet.sqlite`. It's decrypted only while signing, and the wallet database otherwise holds only public data.
+- **On disk,** `wallet.sqlite` holds only the account key (`[fingerprint/84'/1'/0']tprv…`), encrypted with your password. It's decrypted only while signing, and the database otherwise holds only public data. The mnemonic itself is never stored, so a leaked file plus password exposes this one account, not everything the seed controls; your written-down words are the only copy. Wallets created before this stored the mnemonic; the first `send` upgrades them to the account key.
 - **Per-wallet API tokens.** Without its token nobody can read a wallet, reveal addresses or build PSBTs (which would reserve its coins). Registering is one-shot, since descriptors aren't secret: a second registration gets `409`, never the token. A lost token can't be recovered yet; the server admin has to delete the wallet from `--data-dir` so it can be registered again. Wallets registered before tokens existed must be re-registered the same way.
 - **Rate limits per IP** stop registration spam (each registration creates a database file) and request floods (each request syncs with Core). They're in memory and use the connecting IP, so behind a reverse proxy they'd need to read `X-Forwarded-For` instead.
 - **No TLS yet,** so tokens travel in plain text. Keep the server on `127.0.0.1` (the default).
@@ -140,8 +140,8 @@ cargo test -- --ignored           # end-to-end: real server + regtest, full non-
 
 ```
 src/lib.rs          shared: parse_network(), load(), wallet_id(), confirmations()
-src/keys.rs         mnemonic → BIP84 descriptors and keys
-src/secret.rs       encrypted mnemonic storage
+src/keys.rs         mnemonic → account key → BIP84 descriptors
+src/secret.rs       encrypted account key storage
 src/chain.rs        chain backends (Core RPC, Esplora) and sync
 src/history.rs      transaction and address views
 src/send.rs         build → review → sign → finalize → broadcast

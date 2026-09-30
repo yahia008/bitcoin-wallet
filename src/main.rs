@@ -351,9 +351,9 @@ fn send_local(
         return Ok(());
     }
 
-    let mnemonic = unlock(&conn)?;
+    let account_key = unlock(&conn, &wallet)?;
     let mut psbt = draft.psbt;
-    send::sign(&wallet, &mnemonic, &mut psbt)?;
+    send::sign(&wallet, &account_key, &mut psbt)?;
     let tx = send::finalize(&wallet, psbt)?;
     let txid = send::broadcast(&mut wallet, &mut conn, &backend, tx)?;
 
@@ -402,8 +402,8 @@ fn send_via_server(
         return Ok(());
     }
 
-    let mnemonic = unlock(&conn)?;
-    send::sign(&wallet, &mnemonic, &mut psbt)?;
+    let account_key = unlock(&conn, &wallet)?;
+    send::sign(&wallet, &account_key, &mut psbt)?;
     let response = api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() })?;
 
     println!("Broadcast: {}", response.txid);
@@ -422,12 +422,24 @@ fn print_summary(to: &Address, amount: Amount, fee: Amount, change: Amount, inpu
     println!();
 }
 
-/// Asks for the wallet password and decrypts the mnemonic. Only needed for signing.
-fn unlock(conn: &Connection) -> anyhow::Result<Mnemonic> {
+/// Asks for the wallet password and decrypts the account key. Only needed for signing.
+///
+/// Wallets created before we stored only the account key hold the whole mnemonic. The first
+/// unlock swaps it for the account key, once that key is checked against the wallet.
+fn unlock(conn: &Connection, wallet: &Wallet) -> anyhow::Result<String> {
     let password = rpassword::prompt_password("Wallet password: ")?;
-    let words = secret::load(conn, &password)?;
-    Mnemonic::parse_in(Language::English, words.as_str())
-        .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))
+    let secret = secret::load(conn, &password)?;
+    if keys::is_account_key(&secret) {
+        return Ok(secret);
+    }
+
+    let mnemonic = Mnemonic::parse_in(Language::English, secret.as_str())
+        .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))?;
+    let account_key = keys::account_key(&mnemonic)?;
+    send::signing_keys(wallet, &account_key)?;
+    secret::replace(conn, &account_key, &password)?;
+    println!("Upgraded the wallet file: it now stores this account's key, not your recovery phrase.");
+    Ok(account_key)
 }
 
 fn confirm(question: &str) -> anyhow::Result<bool> {
@@ -465,7 +477,7 @@ fn new_password() -> anyhow::Result<String> {
     Ok(password)
 }
 
-/// Creates the wallet database: BDK's wallet state plus the encrypted mnemonic, written in one
+/// Creates the wallet database: BDK's wallet state plus the encrypted account key, written in one
 /// SQLite transaction so we never end up with a wallet whose keys weren't saved.
 /// Returns the first receive address.
 fn init_wallet(
@@ -476,7 +488,8 @@ fn init_wallet(
     birthday: u32,
 ) -> anyhow::Result<AddressInfo> {
     let result = (|| {
-        let (external, internal) = keys::descriptors(mnemonic)?;
+        let account_key = keys::account_key(mnemonic)?;
+        let (external, internal) = keys::descriptors(&account_key)?;
         let mut conn = Connection::open(db).context("opening wallet database")?;
         let mut tx = conn.transaction()?;
 
@@ -487,7 +500,8 @@ fn init_wallet(
         let first = wallet.reveal_next_address(KeychainKind::External);
         // Persist so the revealed index survives restarts (otherwise we'd hand out the same address).
         wallet.persist(&mut tx).context("saving wallet")?;
-        secret::save(&tx, &mnemonic.to_string(), password)?;
+        // Only the account key: the mnemonic itself is never written to disk.
+        secret::save(&tx, &account_key, password)?;
         chain::save_birthday(&tx, birthday)?;
 
         tx.commit().context("committing wallet")?;

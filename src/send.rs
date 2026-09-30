@@ -14,7 +14,6 @@ use bdk_wallet::bitcoin::{
     Address, Amount, EcdsaSighashType, FeeRate, OutPoint, Psbt, Transaction, Txid,
 };
 use bdk_wallet::error::CreateTxError;
-use bdk_wallet::keys::bip39::Mnemonic;
 use bdk_wallet::miniscript::descriptor::{KeyMap, KeyMapWrapper};
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Wallet};
@@ -194,18 +193,24 @@ pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> any
     Ok(Review { fee, change, inputs: tx.input.len() })
 }
 
-/// Signs every input we hold keys for, using keys derived from `mnemonic`. This is the only
-/// step that touches private keys; they live only inside this function.
-pub fn sign(wallet: &Wallet, mnemonic: &Mnemonic, psbt: &mut Psbt) -> anyhow::Result<()> {
+/// The private keys for both keychains, after checking `account_key` really belongs to
+/// `wallet` (its public descriptors must match exactly).
+pub fn signing_keys(wallet: &Wallet, account_key: &str) -> anyhow::Result<KeyMap> {
     let mut keymap = KeyMap::new();
     for keychain in [KeychainKind::External, KeychainKind::Internal] {
-        let (descriptor, keys) = keys::derive(mnemonic, keychain)?;
-        // Guard against signing with keys that don't belong to this wallet.
+        let (descriptor, keys) = keys::derive(account_key, keychain)?;
         if descriptor.to_string() != wallet.public_descriptor(keychain).to_string() {
-            bail!("the stored mnemonic does not match this wallet's descriptors");
+            bail!("the stored key does not match this wallet's descriptors");
         }
         keymap.extend(keys);
     }
+    Ok(keymap)
+}
+
+/// Signs every input we hold keys for, using keys derived from `account_key`. This is the
+/// only step that touches private keys; they live only inside this function.
+pub fn sign(wallet: &Wallet, account_key: &str, psbt: &mut Psbt) -> anyhow::Result<()> {
+    let keymap = signing_keys(wallet, account_key)?;
 
     // Each PSBT input records which key (fingerprint + BIP32 path) can spend it; the signer
     // looks those keys up in our keymap and adds a signature per input.
@@ -262,12 +267,12 @@ mod tests {
 
     /// A wallet holding one unconfirmed 1 BTC coin, and an honest PSBT paying 0.3 BTC.
     fn setup() -> (Wallet, Psbt) {
-        let mnemonic = Mnemonic::parse(
+        let mnemonic = bdk_wallet::keys::bip39::Mnemonic::parse(
             "abandon abandon abandon abandon abandon abandon \
              abandon abandon abandon abandon abandon about",
         )
         .unwrap();
-        let (ext, int) = keys::descriptors(&mnemonic).unwrap();
+        let (ext, int) = keys::descriptors(&keys::account_key(&mnemonic).unwrap()).unwrap();
         let mut wallet = Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
 
         let ours = wallet.reveal_next_address(KeychainKind::External).address;

@@ -19,7 +19,8 @@ cargo test -- --include-ignored  # 24 tests: the 21 above plus the 3 end-to-end 
 
 | Test | What it checks |
 |---|---|
-| `secret::tests::*` | The mnemonic is encrypted, a wrong password is rejected, and the plaintext is never stored |
+| `secret::tests::*` | The secret is encrypted, a wrong password is rejected, the plaintext is never stored, and `replace` overwrites it |
+| `keys::tests::*` | The account key carries its origin, matches the BIP84 test vector, and gives the same descriptors as the old mnemonic derivation |
 | `send::tests::*` | `review` accepts an honest PSBT and rejects tampered ones: a changed amount, redirected change, an extra output, a weak sighash, a faked input value, a missing previous transaction |
 | `server` tests | The server accepts public descriptors and rejects private ones and garbage; API tokens are random and stored hashed; coin reservations expire and release; the rate limiter blocks per IP until the window ends |
 | `client::tests::*` | The CLI saves and finds each server's API token |

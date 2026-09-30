@@ -33,7 +33,8 @@ fn non_custodial_send_flow() {
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
         Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
     let mnemonic = mnemonic.into_key();
-    let (ext, int) = keys::descriptors(&mnemonic).unwrap();
+    let account_key = keys::account_key(&mnemonic).unwrap();
+    let (ext, int) = keys::descriptors(&account_key).unwrap();
     let local = Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
     let external = local.public_descriptor(KeychainKind::External).to_string();
     let internal = local.public_descriptor(KeychainKind::Internal).to_string();
@@ -85,7 +86,7 @@ fn non_custodial_send_flow() {
     let unsigned = BroadcastRequest { psbt: psbt.to_string() };
     assert_eq!(api_status(api.broadcast(&id, &unsigned)), 400);
 
-    send::sign(&local, &mnemonic, &mut psbt).unwrap();
+    send::sign(&local, &account_key, &mut psbt).unwrap();
     let signed = BroadcastRequest { psbt: psbt.to_string() };
     let txid = Txid::from_str(&api.broadcast(&id, &signed).unwrap().txid).unwrap();
     assert!(funder.get_raw_mempool().unwrap().contains(&txid), "tx reached Core's mempool");
@@ -121,7 +122,7 @@ fn non_custodial_send_flow() {
     // Both still broadcast: before reservations, the second would be a double-spend.
     for mut psbt in [first, second] {
         send::review(&local, &psbt, &dest, amount).unwrap();
-        send::sign(&local, &mnemonic, &mut psbt).unwrap();
+        send::sign(&local, &account_key, &mut psbt).unwrap();
         api.broadcast(&id, &BroadcastRequest { psbt: psbt.to_string() }).unwrap();
     }
 }
@@ -261,7 +262,7 @@ fn request(
 fn random_wallet() -> Wallet {
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
         Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
-    let (ext, int) = keys::descriptors(&mnemonic.into_key()).unwrap();
+    let (ext, int) = keys::descriptors(&keys::account_key(&mnemonic.into_key()).unwrap()).unwrap();
     Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap()
 }
 

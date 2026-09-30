@@ -693,23 +693,24 @@ mod tests {
     use bdk_wallet::keys::bip39::Mnemonic;
     use bitcoin_wallet::keys;
 
-    fn mnemonic() -> Mnemonic {
-        Mnemonic::parse(
+    fn account_key() -> String {
+        let mnemonic = Mnemonic::parse(
             "abandon abandon abandon abandon abandon abandon \
              abandon abandon abandon abandon abandon about",
         )
-        .unwrap()
+        .unwrap();
+        keys::account_key(&mnemonic).unwrap()
     }
 
     #[test]
     fn accepts_public_descriptor() {
-        let (public, _) = keys::derive(&mnemonic(), KeychainKind::External).unwrap();
+        let (public, _) = keys::derive(&account_key(), KeychainKind::External).unwrap();
         assert!(public_descriptor(&public.to_string()).is_ok());
     }
 
     #[test]
     fn rejects_private_descriptor() {
-        let (with_secret, _) = keys::descriptors(&mnemonic()).unwrap();
+        let (with_secret, _) = keys::descriptors(&account_key()).unwrap();
         assert!(with_secret.contains("tprv"));
         let err = public_descriptor(&with_secret).err().unwrap();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
