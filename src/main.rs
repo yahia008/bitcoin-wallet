@@ -48,6 +48,8 @@ enum Command {
     Create,
     /// Restore a wallet from an existing mnemonic
     Restore,
+    /// Print the wallet's public descriptors (safe to share with a watch-only server)
+    Export,
     /// Reveal a new receive address
     Address,
     /// List revealed receive addresses and whether they have been used
@@ -92,6 +94,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Create => create(&cli.db),
         Command::Restore => restore(&cli.db),
+        Command::Export => export(&cli.db),
         Command::Address => address(&cli.db),
         Command::Addresses => addresses(&cli),
         Command::Sync => sync(&cli),
@@ -143,6 +146,14 @@ fn restore(db: &Path) -> anyhow::Result<()> {
 
     println!("Wallet restored: {}", db.display());
     println!("First receive address (index {}): {}", first.index, first.address);
+    Ok(())
+}
+
+fn export(db: &Path) -> anyhow::Result<()> {
+    let (_, wallet) = load(db)?;
+    // Public descriptors only: anyone holding these can watch the wallet, but not spend.
+    println!("external: {}", wallet.public_descriptor(KeychainKind::External));
+    println!("internal: {}", wallet.public_descriptor(KeychainKind::Internal));
     Ok(())
 }
 
