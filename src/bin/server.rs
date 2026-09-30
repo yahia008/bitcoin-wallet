@@ -8,11 +8,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
-use axum::extract::{Path, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bdk_bitcoind_rpc::bitcoincore_rpc::{Error as RpcError, jsonrpc};
 use bdk_wallet::bitcoin::{Address, Amount, Psbt, Txid};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
@@ -87,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{id}/transactions/{txid}", get(get_transaction))
         .route("/wallets/{id}/psbt", post(build_psbt))
         .route("/wallets/{id}/broadcast", post(broadcast))
+        .fallback(|| async { ApiError::not_found("no such endpoint") })
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -112,7 +115,7 @@ async fn health() -> Json<Health> {
 /// registering the same wallet again returns the same id with 200 instead of 201.
 async fn register_wallet(
     State(state): State<SharedState>,
-    Json(req): Json<RegisterRequest>,
+    ApiJson(req): ApiJson<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
     let external = public_descriptor(&req.external)?;
     let internal = public_descriptor(&req.internal)?;
@@ -272,7 +275,7 @@ async fn get_transaction(
 async fn build_psbt(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-    Json(req): Json<PsbtRequest>,
+    ApiJson(req): ApiJson<PsbtRequest>,
 ) -> Result<Json<PsbtResponse>, ApiError> {
     let to = Address::from_str(&req.address)
         .map_err(|_| ApiError::bad_request("invalid address"))?
@@ -305,7 +308,7 @@ async fn build_psbt(
 async fn broadcast(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-    Json(req): Json<BroadcastRequest>,
+    ApiJson(req): ApiJson<BroadcastRequest>,
 ) -> Result<Json<BroadcastResponse>, ApiError> {
     let psbt = Psbt::from_str(&req.psbt)
         .map_err(|e| ApiError::bad_request(format!("invalid PSBT: {e}")))?;
@@ -314,8 +317,13 @@ async fn broadcast(
         let tx = send::finalize(&w.wallet, psbt)
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         let WalletEntry { conn, wallet } = w;
-        // TODO: tell "node unreachable" (502) apart from "node rejected the tx" (400).
-        send::broadcast(wallet, conn, rpc, tx).map_err(|e| ApiError::bad_request(format!("{e:#}")))
+        send::broadcast(wallet, conn, rpc, tx).map_err(|e| match node_error(&e) {
+            // Core answered, but refused the tx (e.g. double-spend, fee too low): client's issue.
+            Some(RpcError::JsonRpc(jsonrpc::Error::Rpc(rejection))) => ApiError::bad_request(
+                format!("Bitcoin Core rejected the transaction: {}", rejection.message),
+            ),
+            _ => e.into(),
+        })
     })
     .await?;
     Ok(Json(BroadcastResponse { txid: txid.to_string() }))
@@ -391,12 +399,45 @@ impl ApiError {
     }
 }
 
-/// Unexpected failures become 500s.
+/// Unexpected failures: 502 if Bitcoin Core is down or erroring (not our fault, and worth
+/// retrying), else 500. Details go to the server log, never to the client, since they can
+/// include internal paths and state.
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError { status: StatusCode::INTERNAL_SERVER_ERROR, message: format!("{e:#}") }
+        eprintln!("error: {e:#}");
+        match node_error(&e) {
+            Some(RpcError::JsonRpc(jsonrpc::Error::Transport(_))) => ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: "Bitcoin Core is unreachable".to_owned(),
+            },
+            Some(_) => ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: "Bitcoin Core returned an error".to_owned(),
+            },
+            None => ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "internal error".to_owned(),
+            },
+        }
     }
 }
+
+/// The Bitcoin Core RPC error somewhere in `e`'s cause chain, if any.
+fn node_error(e: &anyhow::Error) -> Option<&RpcError> {
+    e.chain().find_map(|cause| cause.downcast_ref::<RpcError>())
+}
+
+/// Malformed or mistyped JSON bodies get our usual `{"error": ...}` shape.
+impl From<JsonRejection> for ApiError {
+    fn from(rejection: JsonRejection) -> Self {
+        ApiError { status: rejection.status(), message: rejection.body_text() }
+    }
+}
+
+/// Like `axum::Json`, but rejections become `ApiError`s (JSON) instead of plain text.
+#[derive(FromRequest)]
+#[from_request(via(axum::Json), rejection(ApiError))]
+struct ApiJson<T>(T);
 
 impl From<bdk_wallet::rusqlite::Error> for ApiError {
     fn from(e: bdk_wallet::rusqlite::Error) -> Self {

@@ -226,9 +226,8 @@ pub fn broadcast(
     rpc: &Client,
     tx: Transaction,
 ) -> anyhow::Result<Txid> {
-    let txid = rpc
-        .send_raw_transaction(&tx)
-        .context("Bitcoin Core rejected the transaction")?;
+    // No "rejected" wording here: this also fails when Core is simply unreachable.
+    let txid = rpc.send_raw_transaction(&tx).context("broadcasting transaction")?;
 
     // Record it now so balance/history reflect it immediately, without waiting for a sync.
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

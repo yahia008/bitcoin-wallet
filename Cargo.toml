@@ -7,7 +7,7 @@ default-run = "bitcoin-wallet"
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["macros"] }
 bdk_bitcoind_rpc = "0.22.0"
 bdk_wallet = { version = "3.2.0", features = ["rusqlite", "keys-bip39"] }
 chacha20poly1305 = "0.11.0"
