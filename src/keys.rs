@@ -8,7 +8,8 @@ use std::str::FromStr;
 
 use bdk_wallet::KeychainKind;
 use bdk_wallet::bitcoin::NetworkKind;
-use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
+use anyhow::bail;
+use bdk_wallet::bitcoin::bip32::{DerivationPath, Fingerprint, Xpriv};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::keys::bip39::Mnemonic;
@@ -32,6 +33,19 @@ pub fn account_key(mnemonic: &Mnemonic) -> anyhow::Result<String> {
         wildcard: Wildcard::None,
     });
     Ok(key.to_string())
+}
+
+/// Splits an account key into its origin (master fingerprint, account path) and the tprv.
+pub fn parse_account_key(account_key: &str) -> anyhow::Result<(Fingerprint, DerivationPath, Xpriv)> {
+    match DescriptorSecretKey::from_str(account_key)? {
+        DescriptorSecretKey::XPrv(DescriptorXKey {
+            origin: Some((fingerprint, path)),
+            xkey,
+            derivation_path,
+            wildcard: Wildcard::None,
+        }) if derivation_path.is_master() => Ok((fingerprint, path, xkey)),
+        _ => bail!("not an account key ([fingerprint/path]tprv...)"),
+    }
 }
 
 /// Tells a stored account key apart from a mnemonic (what older wallets stored).

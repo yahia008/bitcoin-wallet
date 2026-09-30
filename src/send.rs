@@ -9,12 +9,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
-use bdk_wallet::bitcoin::bip32::ChildNumber;
+use bdk_wallet::bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv};
+use bdk_wallet::bitcoin::psbt::{GetKey, GetKeyError, KeyRequest};
+use bdk_wallet::bitcoin::secp256k1::{Secp256k1, Signing};
 use bdk_wallet::bitcoin::{
-    Address, Amount, EcdsaSighashType, FeeRate, OutPoint, Psbt, Transaction, Txid,
+    Address, Amount, EcdsaSighashType, FeeRate, OutPoint, PrivateKey, Psbt, Transaction, Txid,
 };
 use bdk_wallet::error::CreateTxError;
-use bdk_wallet::miniscript::descriptor::{KeyMap, KeyMapWrapper};
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions, Wallet};
 
@@ -193,30 +194,65 @@ pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> any
     Ok(Review { fee, change, inputs: tx.input.len() })
 }
 
-/// The private keys for both keychains, after checking `account_key` really belongs to
-/// `wallet` (its public descriptors must match exactly).
-pub fn signing_keys(wallet: &Wallet, account_key: &str) -> anyhow::Result<KeyMap> {
-    let mut keymap = KeyMap::new();
+/// Checks that `account_key` really belongs to `wallet`: its public descriptors must match
+/// the wallet's exactly.
+pub fn check_account_key(wallet: &Wallet, account_key: &str) -> anyhow::Result<()> {
     for keychain in [KeychainKind::External, KeychainKind::Internal] {
-        let (descriptor, keys) = keys::derive(account_key, keychain)?;
+        let (descriptor, _) = keys::derive(account_key, keychain)?;
         if descriptor.to_string() != wallet.public_descriptor(keychain).to_string() {
             bail!("the stored key does not match this wallet's descriptors");
         }
-        keymap.extend(keys);
     }
-    Ok(keymap)
+    Ok(())
 }
 
 /// Signs every input we hold keys for, using keys derived from `account_key`. This is the
 /// only step that touches private keys; they live only inside this function.
 pub fn sign(wallet: &Wallet, account_key: &str, psbt: &mut Psbt) -> anyhow::Result<()> {
-    let keymap = signing_keys(wallet, account_key)?;
+    check_account_key(wallet, account_key)?;
+    let (master_fingerprint, account_path, xprv) = keys::parse_account_key(account_key)?;
+    let signer = AccountSigner { master_fingerprint, account_path, xprv };
 
-    // Each PSBT input records which key (fingerprint + BIP32 path) can spend it; the signer
-    // looks those keys up in our keymap and adds a signature per input.
-    psbt.sign(&KeyMapWrapper::from(keymap), wallet.secp_ctx())
+    // Each PSBT input records which key (master fingerprint + BIP32 path) can spend it; the
+    // signer derives that key and adds a signature per input.
+    psbt.sign(&signer, wallet.secp_ctx())
         .map_err(|(_, errors)| anyhow!("signing failed: {errors:?}"))?;
     Ok(())
+}
+
+/// Hands the PSBT signer the key for each input, derived from the account key.
+///
+/// We don't use miniscript's `KeyMapWrapper` here: for a key with an origin like ours
+/// (`[fp/84'/1'/0']tprv`), miniscript 12.3 derives the input's whole path (84'/1'/0'/0/i)
+/// from the account key instead of just the part after the origin (0/i), so it signs with
+/// a key that isn't ours.
+struct AccountSigner {
+    master_fingerprint: Fingerprint,
+    account_path: DerivationPath,
+    xprv: Xpriv,
+}
+
+impl GetKey for AccountSigner {
+    type Error = GetKeyError;
+
+    fn get_key<C: Signing>(
+        &self,
+        key_request: KeyRequest,
+        secp: &Secp256k1<C>,
+    ) -> Result<Option<PrivateKey>, Self::Error> {
+        let KeyRequest::Bip32((fingerprint, path)) = key_request else {
+            return Ok(None);
+        };
+        // Only keys below our account, e.g. m/84'/1'/0' + 0/5.
+        let Some(rest) = path.as_ref().strip_prefix(self.account_path.as_ref()) else {
+            return Ok(None);
+        };
+        if fingerprint != self.master_fingerprint {
+            return Ok(None);
+        }
+        let rest = DerivationPath::from(rest.to_vec());
+        Ok(Some(self.xprv.derive_priv(secp, &rest)?.to_priv()))
+    }
 }
 
 /// Turns signatures into final witnesses and extracts the broadcastable transaction.
@@ -265,14 +301,18 @@ mod tests {
         Address::from_str(s).unwrap().require_network(Network::Regtest).unwrap()
     }
 
-    /// A wallet holding one unconfirmed 1 BTC coin, and an honest PSBT paying 0.3 BTC.
-    fn setup() -> (Wallet, Psbt) {
+    fn account_key() -> String {
         let mnemonic = bdk_wallet::keys::bip39::Mnemonic::parse(
             "abandon abandon abandon abandon abandon abandon \
              abandon abandon abandon abandon abandon about",
         )
         .unwrap();
-        let (ext, int) = keys::descriptors(&keys::account_key(&mnemonic).unwrap()).unwrap();
+        keys::account_key(&mnemonic).unwrap()
+    }
+
+    /// A wallet holding one unconfirmed 1 BTC coin, and an honest PSBT paying 0.3 BTC.
+    fn setup() -> (Wallet, Psbt) {
+        let (ext, int) = keys::descriptors(&account_key()).unwrap();
         let mut wallet = Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
 
         let ours = wallet.reveal_next_address(KeychainKind::External).address;
@@ -331,6 +371,26 @@ mod tests {
             .push(TxOut { value: Amount::from_sat(1000), script_pubkey: addr(ATTACKER).script_pubkey() });
         psbt.outputs.push(Default::default());
         assert!(check(&wallet, &psbt).is_err());
+    }
+
+    /// Regression: signing must produce a PSBT the watch-only side can finalize.
+    #[test]
+    fn signed_psbt_finalizes() {
+        let (wallet, mut psbt) = setup();
+        sign(&wallet, &account_key(), &mut psbt).unwrap();
+        let tx = finalize(&wallet, psbt).unwrap();
+        assert!(tx.input.iter().all(|input| !input.witness.is_empty()));
+    }
+
+    #[test]
+    fn refuses_another_wallets_key() {
+        let (wallet, mut psbt) = setup();
+        let other = bdk_wallet::keys::bip39::Mnemonic::parse(
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        .unwrap();
+        let other = keys::account_key(&other).unwrap();
+        assert!(sign(&wallet, &other, &mut psbt).is_err());
     }
 
     #[test]

@@ -436,7 +436,7 @@ fn unlock(conn: &Connection, wallet: &Wallet) -> anyhow::Result<String> {
     let mnemonic = Mnemonic::parse_in(Language::English, secret.as_str())
         .map_err(|e| anyhow!("stored mnemonic is invalid: {e}"))?;
     let account_key = keys::account_key(&mnemonic)?;
-    send::signing_keys(wallet, &account_key)?;
+    send::check_account_key(wallet, &account_key)?;
     secret::replace(conn, &account_key, &password)?;
     println!("Upgraded the wallet file: it now stores this account's key, not your recovery phrase.");
     Ok(account_key)
