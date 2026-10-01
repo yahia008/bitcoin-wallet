@@ -32,3 +32,18 @@ export async function createWallet(
 ): Promise<NewWallet> {
   return (await loadWallet()).createWallet(words, password, network);
 }
+
+/** Throws unless `address` really is the wallet's receive address at `index`, derived here
+ * from the public descriptor. Never show an address the server gave us without this: a
+ * compromised server could substitute its own, and payments would go to it. */
+export async function verifyReceiveAddress(
+  wallet: { external: string; network: string },
+  info: { index: number; address: string },
+): Promise<void> {
+  const ours = (await loadWallet()).addressAt(wallet.external, info.index, wallet.network);
+  if (ours !== info.address) {
+    throw new Error(
+      `the server's address for index ${info.index} isn't yours (expected ${ours}); not showing it`,
+    );
+  }
+}

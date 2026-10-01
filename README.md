@@ -110,7 +110,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
   - `502`: chain backend (Bitcoin Core or Esplora) unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
-Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
+Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--sync-interval-secs` (default 30): a wallet synced that recently isn't synced again, so a web page load costs one chain scan instead of three, and public Esplora rate limits (blockstream.info: 700 requests/hour) aren't hit; 0 syncs on every request. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
 
 ## Web wallet (in progress)
 
@@ -123,7 +123,9 @@ cargo run --bin server -- --network testnet4 --data-dir server-testnet4   # API 
 cd web && npm install && npm run dev                                       # wallet on :3001
 ```
 
-Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Balance, history and sending in the browser are still to come. Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
+Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Once set up, it shows the balance, a receive address with a QR code, and the transaction history. Every receive address the server hands out is re-derived in the browser from the wallet's own public descriptor and refused if it differs, so a compromised server can't show its own address as yours. Sending from the browser is still to come.
+
+For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
 ## Security model
 

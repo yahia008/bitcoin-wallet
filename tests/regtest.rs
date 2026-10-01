@@ -303,6 +303,8 @@ impl Server {
             .arg(&data_dir)
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
+            // The tests mine blocks and expect the very next request to see them.
+            .args(["--sync-interval-secs", "0"])
             .args(extra_args)
             .spawn()
             .unwrap();

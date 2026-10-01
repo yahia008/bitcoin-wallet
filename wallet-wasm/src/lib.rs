@@ -7,7 +7,7 @@ use bdk_wallet::bitcoin::Network;
 use bdk_wallet::bitcoin::hex::DisplayHex;
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
-use bdk_wallet::miniscript::Segwitv0;
+use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey, Segwitv0};
 use bdk_wallet::{KeychainKind, Wallet};
 use serde::Serialize;
 use wallet_core::crypto::{self, MIN_PASSWORD_LEN};
@@ -77,6 +77,17 @@ pub fn create_wallet(words: &str, password: &str, network: &str) -> Result<JsVal
         },
     };
     Ok(serde_wasm_bindgen::to_value(&new_wallet)?)
+}
+
+/// The address at `index` of a public descriptor, e.g. the wallet's receive descriptor. The
+/// browser uses it to check addresses the server hands out: a compromised server could
+/// otherwise show an attacker's address as "your receive address".
+#[wasm_bindgen(js_name = addressAt)]
+pub fn address_at(descriptor: &str, index: u32, network: &str) -> Result<String, JsError> {
+    let network = parse_network(network)?;
+    let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descriptor).map_err(js)?;
+    let address = descriptor.at_derivation_index(index).map_err(js)?.address(network).map_err(js)?;
+    Ok(address.to_string())
 }
 
 /// An in-memory wallet for deriving descriptors and addresses. Nothing is persisted.

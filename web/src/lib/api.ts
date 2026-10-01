@@ -14,8 +14,8 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, init);
+async function request<T>(path: string, init?: RequestInit, base = API_URL): Promise<T> {
+  const res = await fetch(`${base}${path}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new ApiError(res.status, body?.error ?? `API answered ${res.status}`);
@@ -48,3 +48,45 @@ export function register(external: string, internal: string): Promise<Registrati
     body: JSON.stringify({ external, internal, birthday: 0 }),
   });
 }
+
+// Per-wallet endpoints. They need the wallet's API token, and use the server it registered
+// with. Each call makes the server sync the wallet first, so answers are current.
+
+export type Balance = {
+  confirmed_sat: number;
+  unconfirmed_sat: number;
+  /** Coinbase outputs not yet spendable (regtest mining). */
+  immature_sat: number;
+  total_sat: number;
+};
+
+export type AddressInfo = { index: number; address: string; used: boolean };
+
+export type Transaction = {
+  txid: string;
+  /** Effect on the balance: positive = received, negative = sent (fee included). */
+  net_sat: number;
+  /** null unless this wallet paid the fee. */
+  fee_sat: number | null;
+  confirmed: boolean;
+  confirmations: number;
+  block_height: number | null;
+};
+
+export type WalletAuth = { walletId: string; apiUrl: string; apiToken: string };
+
+function walletRequest<T>(wallet: WalletAuth, path: string, method = "GET"): Promise<T> {
+  return request(
+    `/wallets/${wallet.walletId}${path}`,
+    { method, headers: { authorization: `Bearer ${wallet.apiToken}` } },
+    wallet.apiUrl,
+  );
+}
+
+export const getBalance = (w: WalletAuth) => walletRequest<Balance>(w, "/balance");
+/** Receive addresses handed out so far, and whether each has been paid to. */
+export const getAddresses = (w: WalletAuth) => walletRequest<AddressInfo[]>(w, "/addresses");
+/** Reveals the next receive address. */
+export const newAddress = (w: WalletAuth) => walletRequest<AddressInfo>(w, "/addresses", "POST");
+/** Newest first. */
+export const getTransactions = (w: WalletAuth) => walletRequest<Transaction[]>(w, "/transactions");

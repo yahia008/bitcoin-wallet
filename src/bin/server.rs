@@ -64,6 +64,14 @@ struct Args {
     )]
     cors_origins: Vec<HeaderValue>,
 
+    /// A wallet synced this many seconds ago or less isn't synced again. Each sync costs
+    /// dozens of requests to an Esplora backend (public ones rate-limit, e.g. blockstream.info
+    /// at 700/hour), and a web page load asks for balance, history and an address at once.
+    /// Blocks are ~10 minutes apart and our own broadcasts are recorded immediately, so a
+    /// little staleness is harmless. 0 = sync on every request.
+    #[arg(long, env = "SYNC_INTERVAL_SECS", default_value_t = 30)]
+    sync_interval_secs: u64,
+
     /// Requests per minute allowed from one IP, across all endpoints
     #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 60)]
     rate_limit_per_minute: u32,
@@ -76,12 +84,15 @@ struct Args {
 /// How long coins picked for a PSBT stay reserved if the client never broadcasts it.
 const RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
 
+
 struct WalletEntry {
     conn: Connection,
     wallet: PersistedWallet<Connection>,
     reserved: Reservations,
     /// SHA-256 of the wallet's API token. The token itself is never stored.
     token_hash: sha256::Hash,
+    /// When the wallet was last synced with the chain; None until the first sync.
+    last_sync: Option<Instant>,
 }
 
 /// Coins picked for PSBTs that were handed out but not broadcast yet. BDK only learns a coin
@@ -183,6 +194,7 @@ struct AppState {
     data_dir: PathBuf,
     network: Network,
     backend: Backend,
+    sync_interval: Duration,
     /// Wallets opened so far. Each has its own lock, so requests for different wallets
     /// don't wait on each other; requests for the same wallet run one at a time.
     wallets: Mutex<HashMap<String, Arc<Mutex<WalletEntry>>>>,
@@ -200,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir: args.data_dir,
         network: args.chain.network,
         backend,
+        sync_interval: Duration::from_secs(args.sync_interval_secs),
         wallets: Mutex::new(HashMap::new()),
     });
 
@@ -647,14 +660,14 @@ impl AppState {
                 )
             })?;
         let reserved = Reservations::default();
-        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, token_hash }));
+        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, token_hash, last_sync: None }));
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
     }
 }
 
-/// Checks `token` against wallet `id`, syncs the wallet with the chain, then runs `f` with
-/// exclusive access to it on a blocking thread.
+/// Checks `token` against wallet `id`, syncs the wallet with the chain (unless it was synced
+/// within the sync interval), then runs `f` with exclusive access to it on a blocking thread.
 async fn with_wallet<T: Send + 'static>(
     state: SharedState,
     id: String,
@@ -669,8 +682,11 @@ async fn with_wallet<T: Send + 'static>(
         if token_hash(&token.0) != entry.token_hash {
             return Err(ApiError::unauthorized("invalid API token"));
         }
-        let WalletEntry { conn, wallet, .. } = &mut *entry;
-        chain::sync(wallet, conn, &state.backend)?;
+        let WalletEntry { conn, wallet, last_sync, .. } = &mut *entry;
+        if last_sync.is_none_or(|t| t.elapsed() >= state.sync_interval) {
+            chain::sync(wallet, conn, &state.backend)?;
+            *last_sync = Some(Instant::now());
+        }
         f(&mut entry, &state.backend)
     })
     .await
