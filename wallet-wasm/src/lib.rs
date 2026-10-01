@@ -3,15 +3,15 @@
 
 use std::str::FromStr;
 
-use bdk_wallet::bitcoin::Network;
-use bdk_wallet::bitcoin::hex::DisplayHex;
+use bdk_wallet::bitcoin::hex::{DisplayHex, FromHex};
+use bdk_wallet::bitcoin::{Address, Amount, Network, Psbt};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey, Segwitv0};
 use bdk_wallet::{KeychainKind, Wallet};
-use serde::Serialize;
-use wallet_core::crypto::{self, MIN_PASSWORD_LEN};
-use wallet_core::{keys, wallet_id};
+use serde::{Deserialize, Serialize};
+use wallet_core::crypto::{self, Encrypted, MIN_PASSWORD_LEN};
+use wallet_core::{keys, review, sign, wallet_id};
 use wasm_bindgen::prelude::*;
 
 /// A fresh 12-word recovery phrase (128 bits from the browser's crypto.getRandomValues).
@@ -39,7 +39,7 @@ pub struct NewWallet {
 }
 
 /// The account key encrypted with the password (wallet_core::crypto), hex-encoded.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct EncryptedKey {
     salt: String,
     nonce: String,
@@ -88,6 +88,96 @@ pub fn address_at(descriptor: &str, index: u32, network: &str) -> Result<String,
     let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descriptor).map_err(js)?;
     let address = descriptor.at_derivation_index(index).map_err(js)?.address(network).map_err(js)?;
     Ok(address.to_string())
+}
+
+/// What the user must see before signing, worked out from the PSBT itself.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendReview {
+    fee_sat: u64,
+    change_sat: u64,
+    inputs: usize,
+    /// Fee rate once signed, sat/vB (a lower bound; see `signed_fee_rate`).
+    fee_rate: f64,
+    /// Set when the fee looks like a mistake (`check_fee`): the page must make the user
+    /// confirm it explicitly, like the CLI's --allow-high-fee.
+    fee_warning: Option<String>,
+}
+
+/// Checks a PSBT the server built for "pay `amount_sat` to `to`" before the user signs it: the
+/// same `review` the CLI runs. It must pay exactly that, everything else must be our change,
+/// and input values are verified against their previous transactions. Throws if not.
+#[wasm_bindgen(js_name = reviewSend)]
+pub fn review_send(
+    wallet: JsValue,
+    psbt: &str,
+    to: &str,
+    amount_sat: u64,
+) -> Result<JsValue, JsError> {
+    let stored: StoredWallet = serde_wasm_bindgen::from_value(wallet)?;
+    let network = parse_network(&stored.network)?;
+    let wallet = stored.watch_only(network)?;
+    let psbt = Psbt::from_str(psbt).map_err(|e| JsError::new(&format!("invalid PSBT: {e}")))?;
+    let to = Address::from_str(to)
+        .map_err(|_| JsError::new("invalid address"))?
+        .require_network(network)
+        .map_err(|_| JsError::new("address is for a different network"))?;
+    let amount = Amount::from_sat(amount_sat);
+
+    let review = review::review(&wallet, &psbt, &to, amount).map_err(js)?;
+    let fee_warning = review::check_fee(&psbt.unsigned_tx, amount, review.fee)
+        .err()
+        .map(|e| e.to_string());
+    let summary = SendReview {
+        fee_sat: review.fee.to_sat(),
+        change_sat: review.change.to_sat(),
+        inputs: review.inputs,
+        fee_rate: review::signed_fee_rate(&psbt.unsigned_tx, review.fee),
+        fee_warning,
+    };
+    Ok(serde_wasm_bindgen::to_value(&summary)?)
+}
+
+/// Decrypts the account key with `password` and signs `psbt` (base64), returning the signed
+/// PSBT. The key exists only inside this call: it never reaches JavaScript. Throws on a wrong
+/// password, or a key that doesn't belong to this wallet.
+#[wasm_bindgen(js_name = signPsbt)]
+pub fn sign_psbt(wallet: JsValue, password: &str, psbt: &str) -> Result<String, JsError> {
+    let stored: StoredWallet = serde_wasm_bindgen::from_value(wallet)?;
+    let network = parse_network(&stored.network)?;
+    let wallet = stored.watch_only(network)?;
+    let mut psbt =
+        Psbt::from_str(psbt).map_err(|e| JsError::new(&format!("invalid PSBT: {e}")))?;
+    let key = &stored.encrypted_key;
+    let encrypted = Encrypted {
+        salt: Vec::from_hex(&key.salt).map_err(js)?,
+        nonce: Vec::from_hex(&key.nonce).map_err(js)?,
+        ciphertext: Vec::from_hex(&key.ciphertext).map_err(js)?,
+    };
+    let account_key = crypto::decrypt(&encrypted, password).map_err(js)?;
+    sign::sign(&wallet, &account_key, &mut psbt).map_err(js)?;
+    Ok(psbt.to_string())
+}
+
+/// The parts of the browser's stored wallet (web/src/lib/store.ts) these functions need.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredWallet {
+    network: String,
+    external: String,
+    internal: String,
+    encrypted_key: EncryptedKey,
+}
+
+impl StoredWallet {
+    /// A wallet from the public descriptors only, in memory: enough to review PSBTs and know
+    /// which keys to sign with.
+    fn watch_only(&self, network: Network) -> Result<Wallet, JsError> {
+        Wallet::create(self.external.clone(), self.internal.clone())
+            .network(network)
+            .create_wallet_no_persist()
+            .map_err(js)
+    }
 }
 
 /// An in-memory wallet for deriving descriptors and addresses. Nothing is persisted.

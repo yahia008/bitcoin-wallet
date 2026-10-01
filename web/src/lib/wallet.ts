@@ -47,3 +47,33 @@ export async function verifyReceiveAddress(
     );
   }
 }
+
+/** What `reviewSend` found in the PSBT. */
+export type SendReview = {
+  feeSat: number;
+  changeSat: number;
+  inputs: number;
+  /** sat/vB once signed (a lower bound). */
+  feeRate: number;
+  /** Set when the fee looks like a mistake; the user must confirm it explicitly. */
+  feeWarning?: string;
+};
+
+type WalletKeys = { network: string; external: string; internal: string; encryptedKey: unknown };
+
+/** Runs the CLI's `review` on a server-built PSBT: it must pay exactly `amountSat` to `to`,
+ * with everything else going to our own change. Throws if not. */
+export async function reviewSend(
+  wallet: WalletKeys,
+  psbt: string,
+  to: string,
+  amountSat: number,
+): Promise<SendReview> {
+  return (await loadWallet()).reviewSend(wallet, psbt, to, BigInt(amountSat));
+}
+
+/** Decrypts the account key with `password` inside WASM and signs `psbt`. The key never
+ * reaches JavaScript. Throws on a wrong password. */
+export async function signPsbt(wallet: WalletKeys, password: string, psbt: string): Promise<string> {
+  return (await loadWallet()).signPsbt(wallet, password, psbt);
+}

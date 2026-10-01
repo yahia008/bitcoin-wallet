@@ -11,6 +11,15 @@ export function formatBtc(sats: number): string {
   return `${sign}${whole}.${frac}`;
 }
 
+/** "0.001" → 100000. Exact (string arithmetic, no floating point); undefined if it isn't a
+ * positive amount with at most 8 decimals. */
+export function parseBtc(text: string): number | undefined {
+  const match = /^(\d+)(?:\.(\d{1,8}))?$/.exec(text.trim());
+  if (!match) return undefined;
+  const sats = Number(match[1]) * SATS_PER_BTC + Number((match[2] ?? "").padEnd(8, "0"));
+  return Number.isSafeInteger(sats) && sats > 0 ? sats : undefined;
+}
+
 const EXPLORERS: Record<string, string> = {
   testnet4: "https://mempool.space/testnet4",
   testnet: "https://blockstream.info/testnet",

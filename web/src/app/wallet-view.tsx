@@ -16,6 +16,7 @@ import { explorerTxUrl, formatBtc } from "@/lib/format";
 import { forgetStoredWallet, type StoredWallet } from "@/lib/store";
 import { verifyReceiveAddress } from "@/lib/wallet";
 
+import { Send } from "./send";
 import { Button, Card } from "./wallet-setup";
 
 type Loaded = { balance: Balance; transactions: Transaction[] };
@@ -29,8 +30,8 @@ async function fetchOverview(wallet: StoredWallet): Promise<Loaded> {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** The loaded wallet: balance, a receive address and history. All public data from the
- * server, so no password is needed. Sending comes in a later milestone. */
+/** The loaded wallet: balance, send, a receive address and history. Only sending needs the
+ * password; the rest is public data from the server. */
 export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForget: () => void }) {
   const [data, setData] = useState<Loaded>();
   const [loading, setLoading] = useState(true);
@@ -94,6 +95,8 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
           </Button>
         </div>
       </Card>
+
+      <Send wallet={wallet} onSent={refresh} />
 
       <Receive wallet={wallet} />
 

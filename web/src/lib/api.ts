@@ -75,10 +75,17 @@ export type Transaction = {
 
 export type WalletAuth = { walletId: string; apiUrl: string; apiToken: string };
 
-function walletRequest<T>(wallet: WalletAuth, path: string, method = "GET"): Promise<T> {
+function walletRequest<T>(
+  wallet: WalletAuth,
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = { authorization: `Bearer ${wallet.apiToken}` };
+  if (body !== undefined) headers["content-type"] = "application/json";
   return request(
     `/wallets/${wallet.walletId}${path}`,
-    { method, headers: { authorization: `Bearer ${wallet.apiToken}` } },
+    { method, headers, body: body === undefined ? undefined : JSON.stringify(body) },
     wallet.apiUrl,
   );
 }
@@ -90,3 +97,28 @@ export const getAddresses = (w: WalletAuth) => walletRequest<AddressInfo[]>(w, "
 export const newAddress = (w: WalletAuth) => walletRequest<AddressInfo>(w, "/addresses", "POST");
 /** Newest first. */
 export const getTransactions = (w: WalletAuth) => walletRequest<Transaction[]>(w, "/transactions");
+
+export type FeePriority = "fast" | "normal" | "slow";
+
+export type PsbtRequest = {
+  address: string;
+  amount_sat: number;
+  fee_priority: FeePriority;
+};
+
+/** The server's unsigned PSBT and its own summary. Don't trust the summary: check the PSBT
+ * with `reviewSend` (lib/wallet.ts) before signing. */
+export type PsbtResponse = {
+  psbt: string;
+  amount_sat: number;
+  fee_sat: number;
+  change_sat: number;
+  fee_rate_sat_vb: number;
+};
+
+export const buildPsbt = (w: WalletAuth, req: PsbtRequest) =>
+  walletRequest<PsbtResponse>(w, "/psbt", "POST", req);
+
+/** Sends a signed PSBT; the server finalizes and broadcasts it. */
+export const broadcast = (w: WalletAuth, psbt: string) =>
+  walletRequest<{ txid: string }>(w, "/broadcast", "POST", { psbt });
