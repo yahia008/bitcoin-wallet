@@ -62,16 +62,7 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-8">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Logo className="h-8 w-8" />
-          <span className="text-lg font-semibold tracking-tight">Osok</span>
-        </div>
-        <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-400">
-          {status.health.network}
-        </span>
-      </header>
+    <main className="mx-auto w-full max-w-md flex-1 px-4 py-6">
       <WalletView wallet={status.wallet} onForget={() => setWallet(undefined)} />
     </main>
   );

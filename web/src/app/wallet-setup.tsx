@@ -701,10 +701,10 @@ function ExternalIcon() {
   );
 }
 
-export function Card({ title, children }: { title: string; children: React.ReactNode }) {
+export function Card({ title, children }: { title?: string; children: React.ReactNode }) {
   return (
     <section className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
-      <h2 className="mb-3 font-medium">{title}</h2>
+      {title && <h2 className="mb-3 font-medium">{title}</h2>}
       {children}
     </section>
   );

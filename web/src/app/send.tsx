@@ -77,7 +77,7 @@ export function Send({ wallet, onSent }: { wallet: StoredWallet; onSent: () => v
   if (step.kind === "sent") {
     const url = explorerTxUrl(wallet.network, step.txid);
     return (
-      <Card title="Send">
+      <Card>
         <p className="text-sm text-green-700 dark:text-green-400">Sent. It confirms once mined.</p>
         <p className="mt-1 break-all font-mono text-xs">
           {url ? (
@@ -152,7 +152,7 @@ export function Send({ wallet, onSent }: { wallet: StoredWallet; onSent: () => v
   }
 
   return (
-    <Card title="Send">
+    <Card>
       <div className="flex flex-col gap-2">
         <input
           className={`${input} font-mono`}
