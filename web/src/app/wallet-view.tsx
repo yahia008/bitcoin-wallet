@@ -12,7 +12,7 @@ import {
   type Balance,
   type Transaction,
 } from "@/lib/api";
-import { explorerTxUrl, formatBtc } from "@/lib/format";
+import { explorerTxUrl, formatBtcShort } from "@/lib/format";
 import { forgetStoredWallet, type StoredWallet } from "@/lib/store";
 import { verifyReceiveAddress } from "@/lib/wallet";
 
@@ -106,16 +106,16 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
           Wallet · {wallet.walletId.slice(0, 4)}…{wallet.walletId.slice(-4)}
         </p>
         <p className="mt-3 text-4xl font-semibold tabular-nums tracking-tight">
-          {balance ? formatBtc(balance.total_sat) : "—"}
+          {balance ? formatBtcShort(balance.total_sat) : "—"}
           <span className="ml-2 text-xl text-zinc-400">BTC</span>
         </p>
         <p className="mt-2 h-5 text-sm text-zinc-500 tabular-nums">
           {error ? (
             <span className="text-red-500">{error}</span>
           ) : balance && balance.unconfirmed_sat !== 0 ? (
-            `${formatBtc(balance.unconfirmed_sat)} BTC unconfirmed`
+            `${formatBtcShort(balance.unconfirmed_sat)} BTC unconfirmed`
           ) : balance && balance.immature_sat > 0 ? (
-            `${formatBtc(balance.immature_sat)} BTC immature`
+            `${formatBtcShort(balance.immature_sat)} BTC immature`
           ) : loading ? (
             "Syncing…"
           ) : null}
@@ -436,7 +436,7 @@ function TxRow({
           <p className="text-sm font-semibold">{received ? "Received" : "Sent"}</p>
           <p className="truncate text-xs text-zinc-500">
             {status}
-            {tx.fee_sat !== null && ` · fee ${formatBtc(tx.fee_sat)}`}
+            {tx.fee_sat !== null && ` · fee ${formatBtcShort(tx.fee_sat)}`}
             {" · "}
             {url ? (
               <a href={url} target="_blank" rel="noreferrer" className="underline">
@@ -453,7 +453,7 @@ function TxRow({
           }`}
         >
           {received ? "+" : ""}
-          {formatBtc(tx.net_sat)}
+          {formatBtcShort(tx.net_sat)}
         </p>
       </div>
       {canSpeedUp && !speedingUp && (

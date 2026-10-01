@@ -20,6 +20,13 @@ export function parseBtc(text: string): number | undefined {
   return Number.isSafeInteger(sats) && sats > 0 ? sats : undefined;
 }
 
+/** Like `formatBtc` but without trailing zeros, for glanceable amounts: 0 → "0",
+ * 150000000 → "1.5", 89999719 → "0.89999719". Still exact. Review screens, where every digit
+ * gets checked before signing, keep `formatBtc`. */
+export function formatBtcShort(sats: number): string {
+  return formatBtc(sats).replace(/\.?0+$/, "");
+}
+
 const EXPLORERS: Record<string, string> = {
   testnet4: "https://mempool.space/testnet4",
   testnet: "https://blockstream.info/testnet",
