@@ -500,19 +500,27 @@ function ReviewStep({
       <div className="opacity-40">
         <Header title="Send" onClose={onBack} />
       </div>
-      <div className="absolute inset-x-0 bottom-0 top-12 -mx-4 -mb-6 flex flex-col rounded-t-3xl border-t border-zinc-800 bg-zinc-900 px-5 pt-6 pb-6 shadow-2xl sm:-mx-6 sm:rounded-b-3xl">
+      <div
+        className={
+          asking
+            ? // The password: a compact card floating over the dimmed screen.
+              "absolute inset-0 flex items-start justify-center pt-20"
+            : // The summary: a sheet up from the bottom of the panel.
+              "absolute inset-x-0 bottom-0 top-12 -mx-4 -mb-6 flex flex-col rounded-t-3xl border-t border-zinc-800 bg-zinc-900 px-5 pt-6 pb-6 shadow-2xl sm:-mx-6 sm:rounded-b-3xl"
+        }
+      >
         {asking ? (
-          <>
+          <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
             <div className="flex flex-col items-center text-center">
               <span className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-500/15 text-violet-300">
                 <Logo className="h-7 w-7" />
               </span>
               <h2 className="mt-4 text-xl font-semibold">Enter your password</h2>
               <p className="mt-1 text-sm text-zinc-400">
-                Your password unlocks your key in this browser to sign the transaction.
+                Enter your wallet password to sign this transaction.
               </p>
             </div>
-            <label className="mt-6 flex h-12 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 focus-within:border-zinc-600">
+            <label className="mt-5 flex h-12 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 focus-within:border-zinc-600">
               <input
                 autoFocus
                 type={showPassword ? "text" : "password"}
@@ -535,21 +543,22 @@ function ReviewStep({
               </button>
             </label>
             {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
-            <div className="flex-1" />
-            <PrimaryButton onClick={signAndSend} disabled={!password || busy}>
-              {busy ? "Signing…" : "Sign and send"}
-            </PrimaryButton>
+            <div className="mt-3">
+              <PrimaryButton onClick={signAndSend} disabled={!password || busy}>
+                {busy ? "Signing…" : "Sign and send"}
+              </PrimaryButton>
+            </div>
             <button
               onClick={() => {
                 setAsking(false);
                 setError(undefined);
               }}
               disabled={busy}
-              className="mt-3 h-12 w-full rounded-full border border-zinc-800 text-sm font-semibold disabled:opacity-40"
+              className="mt-3 w-full text-center text-sm text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
             >
               Cancel
             </button>
-          </>
+          </div>
         ) : (
           <>
             <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-4">
