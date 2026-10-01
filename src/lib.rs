@@ -7,13 +7,12 @@ pub mod history;
 pub mod secret;
 pub mod send;
 
-pub use wallet_core::keys;
+pub use wallet_core::{keys, wallet_id};
 
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 use bdk_wallet::bitcoin::Network;
-use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::chain::{ChainPosition, ConfirmationBlockTime};
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{PersistedWallet, Wallet};
@@ -44,13 +43,6 @@ pub fn default_rpc_url(network: Network) -> String {
         _ => 8332, // mainnet
     };
     format!("http://127.0.0.1:{port}")
-}
-
-/// The API's id for a wallet: a hash of its canonical public descriptors (as printed by
-/// `Descriptor`'s Display). The CLI and server both compute it, so ids never need copying.
-pub fn wallet_id(external: &str, internal: &str) -> String {
-    let hash = sha256::Hash::hash(format!("{external}\n{internal}").as_bytes());
-    hash.to_string()[..16].to_owned()
 }
 
 /// Loads the wallet from disk. Needs no password: the database only holds public descriptors.

@@ -123,7 +123,7 @@ cargo run --bin server -- --network testnet4 --data-dir server-testnet4   # API 
 cd web && npm install && npm run dev                                       # wallet on :3001
 ```
 
-Open http://localhost:3001. It shows whether it can reach the API and on which network, and can derive a phrase's first receive address in the browser (a first test of the WASM module). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
+Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Balance, history and sending in the browser are still to come. Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
 ## Security model
 

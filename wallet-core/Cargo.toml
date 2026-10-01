@@ -6,8 +6,12 @@ description = "Wallet logic with no I/O (keys, PSBT review, signing), shared by 
 
 [dependencies]
 anyhow = "1.0.104"
+argon2 = "0.6.0"
 bdk_wallet = { version = "3.2.0", features = ["keys-bip39"] }
+chacha20poly1305 = "0.11.0"
 
 # In the browser, randomness (for new mnemonics, nonces) comes from crypto.getRandomValues.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Two versions in the tree: 0.2 (via secp256k1) and 0.4 (via the encryption crates).
 getrandom = { version = "0.2", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

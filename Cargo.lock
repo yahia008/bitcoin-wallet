@@ -368,7 +368,6 @@ name = "bitcoin-wallet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argon2",
  "axum",
  "bdk_bitcoind_rpc",
  "bdk_esplora",
@@ -782,9 +781,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1499,6 +1500,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1905,8 +1917,11 @@ name = "wallet-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "bdk_wallet",
+ "chacha20poly1305",
  "getrandom 0.2.17",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -1914,6 +1929,8 @@ name = "wallet-wasm"
 version = "0.1.0"
 dependencies = [
  "bdk_wallet",
+ "serde",
+ "serde-wasm-bindgen",
  "wallet-core",
  "wasm-bindgen",
 ]

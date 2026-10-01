@@ -17,8 +17,8 @@ use bitcoin_wallet::chain::{self, ChainArgs};
 use bitcoin_wallet::send::FeePriority;
 use bitcoin_wallet::{history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
+use wallet_core::crypto::MIN_PASSWORD_LEN;
 
-const MIN_PASSWORD_LEN: usize = 8;
 
 #[derive(Parser)]
 #[command(about = "A non-custodial Bitcoin wallet")]

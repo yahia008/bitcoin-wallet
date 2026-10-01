@@ -4,25 +4,92 @@
 use std::str::FromStr;
 
 use bdk_wallet::bitcoin::Network;
-use bdk_wallet::keys::bip39::{Language, Mnemonic};
+use bdk_wallet::bitcoin::hex::DisplayHex;
+use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
+use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
+use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::{KeychainKind, Wallet};
-use wallet_core::keys;
+use serde::Serialize;
+use wallet_core::crypto::{self, MIN_PASSWORD_LEN};
+use wallet_core::{keys, wallet_id};
 use wasm_bindgen::prelude::*;
 
-/// The wallet's first receive address (index 0) for these 12 words on `network`, e.g.
-/// "testnet4". Everything happens in the browser: the words never leave it.
-#[wasm_bindgen(js_name = firstAddress)]
-pub fn first_address(words: &str, network: &str) -> Result<String, JsError> {
+/// A fresh 12-word recovery phrase (128 bits from the browser's crypto.getRandomValues).
+#[wasm_bindgen(js_name = generateMnemonic)]
+pub fn generate_mnemonic() -> Result<String, JsError> {
+    let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
+        Mnemonic::generate((WordCount::Words12, Language::English))
+            .map_err(|_| JsError::new("failed to generate a recovery phrase"))?;
+    Ok(mnemonic.into_key().to_string())
+}
+
+/// Everything the browser keeps about a wallet. Only `encryptedKey` is secret, and it's
+/// useless without the password; the recovery phrase itself is never returned or stored.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewWallet {
+    /// The API's id for this wallet (same as the CLI computes).
+    wallet_id: String,
+    network: String,
+    /// Public descriptors: what gets registered with the API.
+    external: String,
+    internal: String,
+    first_address: String,
+    encrypted_key: EncryptedKey,
+}
+
+/// The account key encrypted with the password (wallet_core::crypto), hex-encoded.
+#[derive(Serialize)]
+pub struct EncryptedKey {
+    salt: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+/// Turns a recovery phrase into a wallet the browser can store: derives the account key,
+/// encrypts it with `password`, and returns the public parts alongside. Slow on purpose
+/// (Argon2id), about a second.
+#[wasm_bindgen(js_name = createWallet)]
+pub fn create_wallet(words: &str, password: &str, network: &str) -> Result<JsValue, JsError> {
     let network = parse_network(network)?;
-    let mnemonic = Mnemonic::parse_in(Language::English, words.trim())
-        .map_err(|e| JsError::new(&format!("invalid recovery phrase: {e}")))?;
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(JsError::new(&format!(
+            "password must be at least {MIN_PASSWORD_LEN} characters"
+        )));
+    }
+    let mnemonic = parse_mnemonic(words)?;
     let account_key = keys::account_key(&mnemonic).map_err(js)?;
-    let (external, internal) = keys::descriptors(&account_key).map_err(js)?;
-    let wallet = Wallet::create(external, internal)
-        .network(network)
-        .create_wallet_no_persist()
-        .map_err(js)?;
-    Ok(wallet.peek_address(KeychainKind::External, 0).address.to_string())
+    let wallet = public_wallet(&account_key, network)?;
+    let external = wallet.public_descriptor(KeychainKind::External).to_string();
+    let internal = wallet.public_descriptor(KeychainKind::Internal).to_string();
+    let encrypted = crypto::encrypt(&account_key, password).map_err(js)?;
+
+    let new_wallet = NewWallet {
+        wallet_id: wallet_id(&external, &internal),
+        network: network.to_string(),
+        first_address: wallet.peek_address(KeychainKind::External, 0).address.to_string(),
+        external,
+        internal,
+        encrypted_key: EncryptedKey {
+            salt: encrypted.salt.to_lower_hex_string(),
+            nonce: encrypted.nonce.to_lower_hex_string(),
+            ciphertext: encrypted.ciphertext.to_lower_hex_string(),
+        },
+    };
+    Ok(serde_wasm_bindgen::to_value(&new_wallet)?)
+}
+
+/// An in-memory wallet for deriving descriptors and addresses. Nothing is persisted.
+fn public_wallet(account_key: &str, network: Network) -> Result<Wallet, JsError> {
+    let (external, internal) = keys::descriptors(account_key).map_err(js)?;
+    Wallet::create(external, internal).network(network).create_wallet_no_persist().map_err(js)
+}
+
+fn parse_mnemonic(words: &str) -> Result<Mnemonic, JsError> {
+    // Same normalising as the CLI's restore: any whitespace, any case.
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    Mnemonic::parse_in(Language::English, words)
+        .map_err(|e| JsError::new(&format!("invalid recovery phrase: {e}")))
 }
 
 /// Mainnet is refused, as in the CLI: keys use the testnet coin type.

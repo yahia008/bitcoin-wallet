@@ -3,24 +3,32 @@
 import { useEffect, useState } from "react";
 
 import { API_URL, health, type Health } from "@/lib/api";
+import { loadStoredWallet, type StoredWallet } from "@/lib/store";
 
-import { FirstAddress } from "./first-address";
+import { WalletSetup } from "./wallet-setup";
+import { WalletView } from "./wallet-view";
 
 type Status =
   | { kind: "checking" }
-  | { kind: "ok"; health: Health }
+  | { kind: "ok"; health: Health; wallet?: StoredWallet }
   | { kind: "error"; message: string };
 
 export default function Home() {
   const [status, setStatus] = useState<Status>({ kind: "checking" });
 
   useEffect(() => {
-    health()
-      .then((h) => setStatus({ kind: "ok", health: h }))
-      .catch((e: unknown) =>
-        setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
-      );
+    (async () => {
+      const h = await health();
+      // The wallet saved in this browser for the server's network, if any.
+      setStatus({ kind: "ok", health: h, wallet: await loadStoredWallet(h.network) });
+    })().catch((e: unknown) =>
+      setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
+    );
   }, []);
+
+  function setWallet(wallet?: StoredWallet) {
+    setStatus((s) => (s.kind === "ok" ? { ...s, wallet } : s));
+  }
 
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-16">
@@ -46,7 +54,12 @@ export default function Home() {
         )}
       </section>
 
-      {status.kind === "ok" && <FirstAddress network={status.health.network} />}
+      {status.kind === "ok" &&
+        (status.wallet ? (
+          <WalletView wallet={status.wallet} onForget={() => setWallet(undefined)} />
+        ) : (
+          <WalletSetup network={status.health.network} onReady={setWallet} />
+        ))}
     </main>
   );
 }
