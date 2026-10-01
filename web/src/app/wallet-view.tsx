@@ -60,10 +60,8 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
 
   async function forget() {
     const sure = window.confirm(
-      "Remove this wallet from this browser? Your coins are not affected, and your recovery " +
-        "phrase restores them. But this browser's API token for this server is deleted too, " +
-        "and the server only issues one per wallet: restoring here against the same server " +
-        "won't work.",
+      "Remove this wallet from this browser? Your coins are not affected: restore it any " +
+        "time with your recovery phrase.",
     );
     if (sure) {
       await forgetStoredWallet(wallet.network);

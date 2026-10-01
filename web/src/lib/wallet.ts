@@ -2,6 +2,7 @@
 // same key handling, PSBT review and signing the CLI uses, so the browser doesn't need a
 // second implementation of the security checks. `npm run wasm` generates src/wasm/.
 
+import { recoverToken, requestChallenge } from "@/lib/api";
 import init, * as wasm from "@/wasm/wallet_wasm";
 
 let ready: Promise<typeof wasm> | null = null;
@@ -74,7 +75,11 @@ export async function reviewSend(
 
 /** Decrypts the account key with `password` inside WASM and signs `psbt`. The key never
  * reaches JavaScript. Throws on a wrong password. */
-export async function signPsbt(wallet: WalletKeys, password: string, psbt: string): Promise<string> {
+export async function signPsbt(
+  wallet: WalletKeys,
+  password: string,
+  psbt: string,
+): Promise<string> {
   return (await loadWallet()).signPsbt(wallet, password, psbt);
 }
 
@@ -99,4 +104,15 @@ export async function reviewBump(
   txid: string,
 ): Promise<BumpReview> {
   return (await loadWallet()).reviewBump(wallet, psbt, originalTx, txid);
+}
+
+/** Gets a new API token for an already-registered wallet by proving we hold its key: the
+ * server sends a one-time challenge, we sign it in WASM (key decrypted with `password`). */
+export async function recoverApiToken(
+  wallet: WalletKeys & { walletId: string },
+  password: string,
+): Promise<string> {
+  const { challenge } = await requestChallenge(wallet.walletId);
+  const signature = (await loadWallet()).proveOwnership(wallet, password, challenge);
+  return (await recoverToken(wallet.walletId, challenge, signature)).token;
 }

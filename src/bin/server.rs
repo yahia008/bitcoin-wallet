@@ -28,8 +28,8 @@ use bdk_wallet::miniscript::Descriptor;
 use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use bitcoin_wallet::api::{
-    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ErrorBody, PsbtRequest,
-    PsbtResponse, RegisterRequest, RegisterResponse,
+    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ChallengeResponse, ErrorBody,
+    PsbtRequest, PsbtResponse, RegisterRequest, RegisterResponse, TokenRequest, TokenResponse,
 };
 use bitcoin_wallet::send::{self, BuildError, FeePriority};
 use bitcoin_wallet::chain::{self, Backend, BackendError, ChainArgs};
@@ -38,6 +38,7 @@ use chacha20poly1305::aead::Generate;
 use clap::Parser;
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
+use wallet_core::ownership;
 
 #[derive(Parser)]
 #[command(about = "Watch-only wallet HTTP API")]
@@ -80,6 +81,9 @@ struct Args {
     #[arg(long, env = "REGISTER_LIMIT_PER_HOUR", default_value_t = 5)]
     register_limit_per_hour: u32,
 }
+
+/// How long a token-recovery challenge can be answered.
+const CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// How long coins picked for a PSBT stay reserved if the client never broadcasts it.
 const RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
@@ -198,6 +202,9 @@ struct AppState {
     /// Wallets opened so far. Each has its own lock, so requests for different wallets
     /// don't wait on each other; requests for the same wallet run one at a time.
     wallets: Mutex<HashMap<String, Arc<Mutex<WalletEntry>>>>,
+    /// Outstanding token-recovery challenges: wallet id -> (challenge, valid until). One per
+    /// wallet; asking again replaces it.
+    challenges: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 type SharedState = Arc<AppState>;
@@ -214,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         backend,
         sync_interval: Duration::from_secs(args.sync_interval_secs),
         wallets: Mutex::new(HashMap::new()),
+        challenges: Mutex::new(HashMap::new()),
     });
 
     let per_ip = Arc::new(RateLimiter::new(args.rate_limit_per_minute, Duration::from_secs(60)));
@@ -224,7 +232,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route(
             "/wallets",
-            post(register_wallet).layer(middleware::from_fn_with_state(registrations, rate_limit)),
+            post(register_wallet)
+                .layer(middleware::from_fn_with_state(registrations.clone(), rate_limit)),
+        )
+        .route("/wallets/{id}/challenge", post(token_challenge))
+        // Issuing tokens is as sensitive as registering, so it shares that stricter limit.
+        .route(
+            "/wallets/{id}/token",
+            post(recover_token).layer(middleware::from_fn_with_state(registrations, rate_limit)),
         )
         .route("/wallets/{id}/balance", get(balance))
         .route("/wallets/{id}/addresses", get(list_addresses).post(new_address))
@@ -343,6 +358,69 @@ fn create_wallet(
 /// 256 random bits, hex-encoded.
 fn new_token() -> String {
     <[u8; 32]>::generate().to_lower_hex_string()
+}
+
+/// Starts API token recovery, for a client that lost its token: returns a random one-time
+/// challenge to sign with the wallet's key (`wallet_core::ownership`). Needs no token: the
+/// signature, not the request, is what proves ownership.
+async fn token_challenge(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<ChallengeResponse>, ApiError> {
+    run_blocking(move || {
+        state.wallet(&id)?; // 404 for wallets we don't know
+        let challenge = new_token();
+        let until = Instant::now() + CHALLENGE_TTL;
+        state
+            .challenges
+            .lock()
+            .map_err(|_| anyhow!("challenge map lock poisoned"))?
+            .insert(id, (challenge.clone(), until));
+        Ok(Json(ChallengeResponse { challenge, expires_in_secs: CHALLENGE_TTL.as_secs() }))
+    })
+    .await
+}
+
+/// Issues a new API token to a client that signed our challenge with the wallet's key. The
+/// old token stops working, so a leaked one can be revoked this way too.
+async fn recover_token(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<TokenRequest>,
+) -> Result<Json<TokenResponse>, ApiError> {
+    run_blocking(move || {
+        // A challenge gets one answer, right or wrong, so signatures can't be retried
+        // against it (or replayed later).
+        let issued = state
+            .challenges
+            .lock()
+            .map_err(|_| anyhow!("challenge map lock poisoned"))?
+            .remove(&id);
+        match issued {
+            Some((challenge, until)) if challenge == req.challenge && Instant::now() < until => {}
+            _ => {
+                return Err(ApiError::unauthorized(
+                    "unknown or expired challenge; request a new one",
+                ));
+            }
+        }
+
+        let entry = state.wallet(&id)?;
+        let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
+        let external = entry.wallet.public_descriptor(KeychainKind::External).clone();
+        ownership::verify(&external, &id, &req.challenge, &req.signature)
+            .map_err(|e| ApiError::unauthorized(format!("{e:#}")))?;
+
+        let token = new_token();
+        let hash = token_hash(&token);
+        entry.conn.execute(
+            "UPDATE api_token SET hash = ?1 WHERE id = 0",
+            params![hash.as_byte_array()],
+        )?;
+        entry.token_hash = hash;
+        Ok(Json(TokenResponse { token }))
+    })
+    .await
 }
 
 /// Tokens are 256 random bits, so unlike passwords there's nothing to brute-force and a fast

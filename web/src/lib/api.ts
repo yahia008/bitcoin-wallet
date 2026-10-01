@@ -141,3 +141,20 @@ export type BumpResponse = {
 /** Asks for a fee bump (RBF) of one of our unconfirmed transactions. */
 export const bumpFee = (w: WalletAuth, req: BumpRequest) =>
   walletRequest<BumpResponse>(w, "/bump", "POST", req);
+
+// Token recovery: for a wallet whose API token was lost (e.g. "Forget" then restore). These
+// need no token; the signature over the challenge proves we hold the wallet's key.
+
+/** A one-time challenge to sign with the wallet's key. */
+export const requestChallenge = (walletId: string) =>
+  request<{ challenge: string; expires_in_secs: number }>(`/wallets/${walletId}/challenge`, {
+    method: "POST",
+  });
+
+/** Trades a signed challenge for a new API token; the old token stops working. */
+export const recoverToken = (walletId: string, challenge: string, signature: string) =>
+  request<{ token: string }>(`/wallets/${walletId}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ challenge, signature }),
+  });

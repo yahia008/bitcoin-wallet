@@ -22,7 +22,28 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub id: String,
     /// Send as `Authorization: Bearer <token>` on every `/wallets/{id}/...` request. Returned
-    /// only once, at registration; the server keeps just a hash of it.
+    /// only once, at registration; the server keeps just a hash of it. Lost it? Prove you
+    /// hold the wallet's key via `/challenge` + `/token` to get a new one.
+    pub token: String,
+}
+
+/// A one-time challenge for API token recovery: sign it with `wallet_core::ownership::sign`.
+#[derive(Serialize, Deserialize)]
+pub struct ChallengeResponse {
+    pub challenge: String,
+    pub expires_in_secs: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TokenRequest {
+    pub challenge: String,
+    /// `wallet_core::ownership::sign` over the challenge: DER ECDSA signature, hex.
+    pub signature: String,
+}
+
+/// A fresh API token. The wallet's previous token stops working.
+#[derive(Serialize, Deserialize)]
+pub struct TokenResponse {
     pub token: String,
 }
 

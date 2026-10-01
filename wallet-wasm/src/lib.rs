@@ -12,7 +12,7 @@ use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey, Segwitv0};
 use bdk_wallet::{KeychainKind, Wallet};
 use serde::{Deserialize, Serialize};
 use wallet_core::crypto::{self, Encrypted, MIN_PASSWORD_LEN};
-use wallet_core::{keys, review, sign, wallet_id};
+use wallet_core::{keys, ownership, review, sign, wallet_id};
 use wasm_bindgen::prelude::*;
 
 /// A fresh 12-word recovery phrase (128 bits from the browser's crypto.getRandomValues).
@@ -207,21 +207,28 @@ pub fn sign_psbt(wallet: JsValue, password: &str, psbt: &str) -> Result<String, 
     let wallet = stored.watch_only(network)?;
     let mut psbt =
         Psbt::from_str(psbt).map_err(|e| JsError::new(&format!("invalid PSBT: {e}")))?;
-    let key = &stored.encrypted_key;
-    let encrypted = Encrypted {
-        salt: Vec::from_hex(&key.salt).map_err(js)?,
-        nonce: Vec::from_hex(&key.nonce).map_err(js)?,
-        ciphertext: Vec::from_hex(&key.ciphertext).map_err(js)?,
-    };
-    let account_key = crypto::decrypt(&encrypted, password).map_err(js)?;
+    let account_key = stored.decrypt_key(password)?;
     sign::sign(&wallet, &account_key, &mut psbt).map_err(js)?;
     Ok(psbt.to_string())
+}
+
+/// Signs the server's token-recovery `challenge` with the wallet's key (decrypted with
+/// `password`, inside WASM), proving we own the wallet so the server issues a new API token.
+#[wasm_bindgen(js_name = proveOwnership)]
+pub fn prove_ownership(wallet: JsValue, password: &str, challenge: &str) -> Result<String, JsError> {
+    let stored: StoredWallet = serde_wasm_bindgen::from_value(wallet)?;
+    let network = parse_network(&stored.network)?;
+    let account_key = stored.decrypt_key(password)?;
+    // The server would refuse a signature by the wrong key anyway; this says why up front.
+    sign::check_account_key(&stored.watch_only(network)?, &account_key).map_err(js)?;
+    ownership::sign(&account_key, &stored.wallet_id, challenge).map_err(js)
 }
 
 /// The parts of the browser's stored wallet (web/src/lib/store.ts) these functions need.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredWallet {
+    wallet_id: String,
     network: String,
     external: String,
     internal: String,
@@ -236,6 +243,17 @@ impl StoredWallet {
             .network(network)
             .create_wallet_no_persist()
             .map_err(js)
+    }
+
+    /// The account key, decrypted with `password`. Never leaves WASM.
+    fn decrypt_key(&self, password: &str) -> Result<String, JsError> {
+        let key = &self.encrypted_key;
+        let encrypted = Encrypted {
+            salt: Vec::from_hex(&key.salt).map_err(js)?,
+            nonce: Vec::from_hex(&key.nonce).map_err(js)?,
+            ciphertext: Vec::from_hex(&key.ciphertext).map_err(js)?,
+        };
+        crypto::decrypt(&encrypted, password).map_err(js)
     }
 }
 

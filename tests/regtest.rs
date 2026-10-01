@@ -19,7 +19,8 @@ use bdk_wallet::{KeychainKind, Wallet};
 use bitcoin_wallet::api::{BroadcastRequest, PsbtRequest, RegisterRequest};
 use bitcoin_wallet::client::{ApiClient, ApiError};
 use bitcoin_wallet::{keys, send, wallet_id};
-use serde_json::Value;
+use serde_json::{Value, json};
+use wallet_core::ownership;
 
 const RPC_URL: &str = "http://127.0.0.1:18443";
 const FUNDER: &str = "itest-funder";
@@ -200,6 +201,57 @@ fn birthday_skips_earlier_blocks() {
     assert_eq!(api_status(ApiClient::new(&server.url).register(&request)), 400);
 }
 
+#[test]
+#[ignore = "needs the regtest node: docker compose up -d"]
+fn lost_token_is_recovered_by_proving_key_ownership() {
+    let server = Server::start();
+    let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =
+        Mnemonic::generate((WordCount::Words12, Language::English)).unwrap();
+    let account_key = keys::account_key(&mnemonic.into_key()).unwrap();
+    let (ext, int) = keys::descriptors(&account_key).unwrap();
+    let wallet =
+        Wallet::create(ext, int).network(Network::Regtest).create_wallet_no_persist().unwrap();
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: 0,
+    };
+    let registered = ApiClient::new(&server.url).register(&request).unwrap();
+    let old_token = registered.token;
+    let wallet_url = format!("{}/wallets/{}", server.url, registered.id);
+    let challenge = || {
+        let response = post_json(&format!("{wallet_url}/challenge"), json!({})).unwrap();
+        response["challenge"].as_str().unwrap().to_owned()
+    };
+    let recover = |challenge: &str, signature: &str| {
+        post_json(
+            &format!("{wallet_url}/token"),
+            json!({ "challenge": challenge, "signature": signature }),
+        )
+    };
+
+    // Someone without the key can't get a token: a signature by another wallet fails.
+    let c = challenge();
+    let other = Mnemonic::parse(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let other = keys::account_key(&other).unwrap();
+    let forged = ownership::sign(&other, &registered.id, &c).unwrap();
+    assert_eq!(recover(&c, &forged).unwrap_err(), 401);
+
+    // The owner signs a fresh challenge and gets a new token.
+    let c = challenge();
+    let signature = ownership::sign(&account_key, &registered.id, &c).unwrap();
+    let new_token = recover(&c, &signature).unwrap()["token"].as_str().unwrap().to_owned();
+    // A challenge is good for one answer only.
+    assert_eq!(recover(&c, &signature).unwrap_err(), 401);
+
+    let balance_url = format!("{wallet_url}/balance");
+    assert_eq!(http_status("GET", &balance_url, Some(&old_token)), 401, "old token revoked");
+    assert_eq!(http("GET", &balance_url, &new_token)["total_sat"], 0);
+}
+
 /// A Core wallet with spendable coins to fund the test wallet from.
 fn funder_wallet() -> Client {
     let auth = || Auth::UserPass("wallet".into(), "wallet".into());
@@ -256,6 +308,15 @@ fn request(
             }
             request.send_empty()
         }
+    }
+}
+
+/// POSTs a JSON body; the parsed response, or the error status.
+fn post_json(url: &str, body: Value) -> Result<Value, u16> {
+    match ureq::post(url).send_json(&body) {
+        Ok(mut response) => Ok(response.body_mut().read_json().unwrap()),
+        Err(ureq::Error::StatusCode(status)) => Err(status),
+        Err(e) => panic!("request to {url} failed: {e}"),
     }
 }
 

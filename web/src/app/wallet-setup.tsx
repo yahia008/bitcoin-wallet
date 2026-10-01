@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { API_URL, ApiError, register } from "@/lib/api";
 import { saveStoredWallet, type StoredWallet } from "@/lib/store";
-import { createWallet, loadWallet } from "@/lib/wallet";
+import { createWallet, loadWallet, recoverApiToken } from "@/lib/wallet";
 
 const MIN_PASSWORD_LEN = 8; // same as wallet-core's crypto::MIN_PASSWORD_LEN
 
@@ -88,9 +88,18 @@ function SetupForm({
       // Derives the account key and encrypts it, all in this browser.
       const created = await createWallet(words, password, network);
       // Only the public descriptors go to the server.
-      const registration = await register(created.external, created.internal);
-      if (registration.id !== created.walletId) {
-        throw new Error("the server computed a different wallet id; not saving");
+      let apiToken: string;
+      try {
+        const registration = await register(created.external, created.internal);
+        if (registration.id !== created.walletId) {
+          throw new Error("the server computed a different wallet id; not saving");
+        }
+        apiToken = registration.token;
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 409)) throw e;
+        // Already registered (e.g. restored after "Forget"): the server won't hand out the
+        // old token, so prove we hold the key and get a new one.
+        apiToken = await recoverApiToken(created, password);
       }
       const wallet: StoredWallet = {
         walletId: created.walletId,
@@ -100,7 +109,7 @@ function SetupForm({
         firstAddress: created.firstAddress,
         encryptedKey: created.encryptedKey,
         apiUrl: API_URL,
-        apiToken: registration.token,
+        apiToken,
         createdAt: new Date().toISOString(),
       };
       await saveStoredWallet(wallet);
@@ -117,8 +126,8 @@ function SetupForm({
       {creating ? (
         <>
           <p className="mb-2 text-sm">
-            Write these 12 words down, in order, on paper. They are the <strong>only</strong> way
-            to recover your coins. This browser will not keep them.
+            Write these 12 words down, in order, on paper. They are the <strong>only</strong> way to
+            recover your coins. This browser will not keep them.
           </p>
           <ol className="mb-3 grid grid-cols-3 gap-2 font-mono text-sm">
             {generatedWords.split(" ").map((word, i) => (
@@ -185,13 +194,6 @@ function SetupForm({
 }
 
 function explain(e: unknown): string {
-  if (e instanceof ApiError && e.status === 409) {
-    // Tokens are shown once, at registration (see the API's register_wallet).
-    return (
-      "This wallet is already registered with this server, so it won't hand out its API " +
-      "token again. Use a server with a fresh --data-dir for the web wallet."
-    );
-  }
   return e instanceof Error ? e.message : String(e);
 }
 

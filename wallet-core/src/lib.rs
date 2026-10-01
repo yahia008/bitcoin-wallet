@@ -3,6 +3,7 @@
 
 pub mod crypto;
 pub mod keys;
+pub mod ownership;
 pub mod review;
 pub mod sign;
 
