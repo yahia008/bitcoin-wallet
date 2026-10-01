@@ -245,12 +245,12 @@ function PhraseStep({
 }) {
   const creating = generatedWords !== undefined;
   const [typedWords, setTypedWords] = useState("");
-  const [wroteDown, setWroteDown] = useState(false);
+  // When creating: explain the phrase, show it, then have the user confirm it.
+  const [stage, setStage] = useState<"intro" | "show" | "confirm">("intro");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   const words = generatedWords ?? typedWords;
-  const ready = creating ? wroteDown : typedWords.trim() !== "";
 
   async function submit() {
     setBusy(true);
@@ -292,6 +292,25 @@ function PhraseStep({
     }
   }
 
+  if (creating && stage === "intro") {
+    return <PhraseIntro onShow={() => setStage("show")} />;
+  }
+
+  if (creating && stage === "confirm") {
+    return (
+      <ConfirmPhrase
+        words={generatedWords.split(" ")}
+        busy={busy}
+        error={error}
+        onConfirmed={submit}
+        onShowAgain={() => {
+          setError(undefined);
+          setStage("show");
+        }}
+      />
+    );
+  }
+
   return creating ? (
     <SetupCard
       title="Your Recovery Phrase"
@@ -308,23 +327,12 @@ function PhraseStep({
         They are the <strong className="text-zinc-100">only</strong> way to recover your coins.
         Anyone who sees them can take your coins, and this browser won&apos;t keep them.
       </p>
-      <label className="mt-6 flex items-center gap-3 text-sm text-zinc-400">
-        <input
-          type="checkbox"
-          className="h-4 w-4 accent-violet-500"
-          checked={wroteDown}
-          onChange={(e) => setWroteDown(e.target.checked)}
-        />
-        I&apos;ve written them down
-      </label>
-      {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
-      <StepButtons
-        onBack={onBack}
-        onNext={submit}
-        nextLabel={busy ? "Creating…" : "Create wallet"}
-        nextDisabled={!ready || busy}
-        backDisabled={busy}
-      />
+      <button
+        className="mt-8 h-11 w-full rounded-full bg-zinc-100 text-sm font-semibold text-zinc-900 transition-colors hover:bg-white"
+        onClick={() => setStage("confirm")}
+      >
+        I’ve saved my phrase somewhere safe
+      </button>
     </SetupCard>
   ) : (
     <SetupCard title="Import Your Wallet" subtitle="Enter your 12-word recovery phrase">
@@ -342,10 +350,216 @@ function PhraseStep({
         onBack={onBack}
         onNext={submit}
         nextLabel={busy ? "Importing…" : "Import wallet"}
-        nextDisabled={!ready || busy}
+        nextDisabled={!typedWords.trim() || busy}
         backDisabled={busy}
       />
     </SetupCard>
+  );
+}
+
+/** Fisher–Yates shuffle; positions, not words, so a phrase with a repeated word still works. */
+function shuffledPositions(count: number): number[] {
+  const order = Array.from({ length: count }, (_, i) => i);
+  for (let i = count - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
+/** The user taps the shuffled words in their original order, proving they wrote the phrase
+ * down before the wallet is created. There's deliberately no way to skip this. */
+function ConfirmPhrase({
+  words,
+  busy,
+  error,
+  onConfirmed,
+  onShowAgain,
+}: {
+  words: string[];
+  busy: boolean;
+  error?: string;
+  onConfirmed: () => void;
+  onShowAgain: () => void;
+}) {
+  const [order] = useState(() => shuffledPositions(words.length));
+  // Positions in `words` of the chips tapped so far, in tap order.
+  const [picked, setPicked] = useState<number[]>([]);
+  const [wrong, setWrong] = useState(false);
+
+  function toggle(position: number) {
+    setWrong(false);
+    setPicked((p) => (p.includes(position) ? p.filter((x) => x !== position) : [...p, position]));
+  }
+
+  function confirm() {
+    // Compare words, not positions: if a word appears twice, either chip is right.
+    const correct = picked.every((position, i) => words[position] === words[i]);
+    if (correct) {
+      onConfirmed();
+    } else {
+      setWrong(true);
+    }
+  }
+
+  return (
+    <SetupCard
+      title="Confirm Your Recovery Phrase"
+      subtitle="Please select each word in the same order you have them noted to confirm you got them right."
+    >
+      <div className="grid grid-cols-2 gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
+        {order.map((position) => {
+          const number = picked.indexOf(position) + 1;
+          return (
+            <button
+              key={position}
+              onClick={() => toggle(position)}
+              disabled={busy}
+              className={`relative h-9 rounded-lg border text-sm font-semibold transition-colors ${
+                number
+                  ? "border-violet-500 bg-violet-500/15 text-violet-100"
+                  : "border-zinc-800 bg-zinc-900 hover:border-zinc-600"
+              }`}
+            >
+              {number > 0 && (
+                <span className="absolute top-1/2 left-2 -translate-y-1/2 text-xs text-violet-300">
+                  {number}
+                </span>
+              )}
+              {words[position]}
+            </button>
+          );
+        })}
+      </div>
+      {wrong && (
+        <p className="mt-4 text-sm text-red-500">
+          That&apos;s not the right order. Tap a word again to unselect it, and check against your
+          written phrase.
+        </p>
+      )}
+      {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
+      <button
+        className="mt-6 h-11 w-full rounded-xl text-sm font-semibold transition-colors enabled:bg-zinc-100 enabled:text-zinc-900 enabled:hover:bg-white disabled:border disabled:border-zinc-800 disabled:text-zinc-500"
+        onClick={confirm}
+        disabled={picked.length !== words.length || busy}
+      >
+        {busy ? "Creating…" : "Confirm"}
+      </button>
+      <p className="mt-4 text-center text-sm text-zinc-400">
+        Osok never stores your phrase, so this is your last chance to see it.{" "}
+        <button className="font-medium text-zinc-100 hover:underline" onClick={onShowAgain}>
+          Show my phrase again
+        </button>
+      </p>
+    </SetupCard>
+  );
+}
+
+/** Before the 12 words appear: what they are and how to keep them safe. */
+function PhraseIntro({ onShow }: { onShow: () => void }) {
+  const points: [React.ReactNode, string][] = [
+    [
+      <LockIcon key="lock" />,
+      "Your recovery phrase gives you full access to your wallet and funds",
+    ],
+    [
+      <PasswordIcon key="password" />,
+      "If you forget your password, you can use the recovery phrase to access your wallet",
+    ],
+    [<HiddenIcon key="hidden" />, "NEVER share this phrase with anyone"],
+    [<InfoIcon key="info" />, "No one from Osok will ever ask for your recovery phrase"],
+  ];
+  return (
+    <section className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-800/40 p-6">
+      <h1 className="text-2xl font-bold tracking-tight">Recovery Phrase</h1>
+      <p className="mt-3 text-zinc-400">
+        Your recovery phrase gives you access to your wallet and is the only way to access it in a
+        new browser. <span className="text-zinc-100">Keep it in a safe place.</span>
+      </p>
+      <ul className="mt-6 flex flex-col gap-4">
+        {points.map(([icon, text]) => (
+          <li key={text} className="flex items-start gap-3">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-950/70">
+              {icon}
+            </span>
+            <span className="pt-1 text-sm leading-6">{text}</span>
+          </li>
+        ))}
+      </ul>
+      <button
+        className="mt-8 h-11 w-full rounded-xl bg-zinc-100 text-sm font-semibold text-zinc-900 transition-colors hover:bg-white"
+        onClick={onShow}
+      >
+        Show recovery phrase
+      </button>
+    </section>
+  );
+}
+
+const icon = "h-4 w-4";
+
+function LockIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${icon} text-lime-400`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <rect x="3" y="7" width="10" height="7" rx="1.5" />
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+    </svg>
+  );
+}
+
+function PasswordIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${icon} text-amber-400`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <rect x="1.5" y="4.5" width="13" height="7" rx="1.5" />
+      <path d="M5 8h.01M8 8h.01M11 8h.01" strokeLinecap="round" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function HiddenIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${icon} text-pink-500`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <path d="M2 8s2.2-4 6-4 6 4 6 4-2.2 4-6 4-6-4-6-4Z" />
+      <circle cx="8" cy="8" r="1.8" />
+      <path d="M2.5 2.5l11 11" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${icon} text-sky-500`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.8v3.7M8 11h.01" strokeLinecap="round" />
+    </svg>
   );
 }
 
