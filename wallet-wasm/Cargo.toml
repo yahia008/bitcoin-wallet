@@ -13,3 +13,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wallet-core = { path = "../wallet-core" }
 wasm-bindgen = "0.2"
+
+# Browser builds only: secp256k1's precomputed tables (~1 MB) shrink to a few KB, at the cost
+# of slower elliptic-curve multiplication, which a wallet doing a few operations per action
+# doesn't notice. Native builds of the workspace keep the fast tables.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+secp256k1 = { version = "0.29", features = ["lowmemory"] }

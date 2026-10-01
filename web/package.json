@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "wasm": "wasm-pack build ../wallet-wasm --target web --release --out-dir ../web/src/wasm --no-pack",
+    "wasm": "wasm-pack build ../wallet-wasm --target web --profile wasm --out-dir ../web/src/wasm --no-pack",
     "predev": "npm run wasm",
     "dev": "next dev -p 3001",
     "prebuild": "npm run wasm",

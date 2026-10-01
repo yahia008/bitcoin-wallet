@@ -1929,6 +1929,7 @@ name = "wallet-wasm"
 version = "0.1.0"
 dependencies = [
  "bdk_wallet",
+ "secp256k1",
  "serde",
  "serde-wasm-bindgen",
  "wallet-core",
