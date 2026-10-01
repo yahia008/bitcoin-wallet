@@ -88,7 +88,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 
 | Method | Endpoint | Body | Returns |
 |---|---|---|---|
-| GET | `/health` | | `{"status":"ok"}` |
+| GET | `/health` | | `{"status":"ok","network":"testnet4"}` |
 | POST | `/wallets` | `{external, internal, birthday?}` public descriptors + start height | `201` `{id, token}` (`409` if already registered) |
 | GET | `/wallets/{id}/balance` | | `{confirmed_sat, unconfirmed_sat, immature_sat, total_sat}` |
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
@@ -110,7 +110,18 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
   - `502`: chain backend (Bitcoin Core or Esplora) unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
-Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network.
+Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
+
+## Web wallet (in progress)
+
+`web/` is a Next.js + TypeScript + Tailwind app that will do what the CLI does, in the browser: keys stay in the browser, which talks to the same API server. It builds to static files (`output: "export"`), so there's no Next.js server that could ever see a secret.
+
+```bash
+cargo run --bin server -- --network testnet4 --data-dir server-testnet4   # API on :3000
+cd web && npm install && npm run dev                                       # wallet on :3001
+```
+
+Open http://localhost:3001. It shows whether it can reach the API and on which network. Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
 ## Security model
 
@@ -154,6 +165,7 @@ src/client.rs       HTTP client used by the CLI
 src/main.rs         CLI
 src/bin/server.rs   API server
 tests/regtest.rs    end-to-end test
+web/                web wallet (Next.js, static export)
 ```
 
 ## Known limitations

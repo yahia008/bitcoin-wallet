@@ -12,7 +12,8 @@ use anyhow::anyhow;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::{HeaderValue, Method};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -36,6 +37,7 @@ use bitcoin_wallet::{history, load, wallet_id};
 use chacha20poly1305::aead::Generate;
 use clap::Parser;
 use serde::Serialize;
+use tower_http::cors::CorsLayer;
 
 #[derive(Parser)]
 #[command(about = "Watch-only wallet HTTP API")]
@@ -51,6 +53,16 @@ struct Args {
     /// Use a separate data dir per network: wallets are tied to the one they registered on.
     #[command(flatten)]
     chain: ChainArgs,
+
+    /// Web page origins allowed to call this API from a browser (CORS), comma-separated.
+    /// The web wallet in web/ runs on port 3001 in development.
+    #[arg(
+        long,
+        env = "CORS_ORIGINS",
+        value_delimiter = ',',
+        default_value = "http://localhost:3001,http://127.0.0.1:3001"
+    )]
+    cors_origins: Vec<HeaderValue>,
 
     /// Requests per minute allowed from one IP, across all endpoints
     #[arg(long, env = "RATE_LIMIT_PER_MINUTE", default_value_t = 60)]
@@ -210,6 +222,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{id}/broadcast", post(broadcast))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(middleware::from_fn_with_state(per_ip, rate_limit))
+        // Outermost, so even rate-limit and error responses carry CORS headers and the browser
+        // can read them. Only listed origins: any other site's scripts can't use the API.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(args.cors_origins)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+                .expose_headers([RETRY_AFTER]),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -226,10 +247,12 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+    /// Clients must use the same network, e.g. to parse addresses.
+    network: String,
 }
 
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+async fn health(State(state): State<SharedState>) -> Json<Health> {
+    Json(Health { status: "ok", network: state.network.to_string() })
 }
 
 /// Registers a watch-only wallet and returns its API token. The token is shown only here, once:
