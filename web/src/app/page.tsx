@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { API_URL, health, type Health } from "@/lib/api";
-import { loadStoredWallet, type StoredWallet } from "@/lib/store";
+import { loadAccounts, setActiveAccount, type Accounts, type StoredWallet } from "@/lib/store";
 
 import { Logo } from "./logo";
 import { Card, WalletSetup } from "./wallet-setup";
@@ -11,7 +11,7 @@ import { WalletView } from "./wallet-view";
 
 type Status =
   | { kind: "checking" }
-  | { kind: "ok"; health: Health; wallet?: StoredWallet }
+  | { kind: "ok"; health: Health; accounts: Accounts }
   | { kind: "error"; message: string };
 
 export default function Home() {
@@ -20,15 +20,25 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       const h = await health();
-      // The wallet saved in this browser for the server's network, if any.
-      setStatus({ kind: "ok", health: h, wallet: await loadStoredWallet(h.network) });
+      // The accounts saved in this browser for the server's network, if any.
+      setStatus({ kind: "ok", health: h, accounts: await loadAccounts(h.network) });
     })().catch((e: unknown) =>
       setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
     );
   }, []);
 
-  function setWallet(wallet?: StoredWallet) {
-    setStatus((s) => (s.kind === "ok" ? { ...s, wallet } : s));
+  function setAccounts(accounts: Accounts) {
+    setStatus((s) => (s.kind === "ok" ? { ...s, accounts } : s));
+  }
+
+  /** Reloads from storage, e.g. after an account was added or the wallet forgotten. */
+  async function reload(network: string) {
+    setAccounts(await loadAccounts(network));
+  }
+
+  async function switchTo(wallet: StoredWallet) {
+    await setActiveAccount(wallet.network, wallet.walletId);
+    setStatus((s) => (s.kind === "ok" ? { ...s, accounts: { ...s.accounts, active: wallet } } : s));
   }
 
   if (status.kind === "checking") {
@@ -53,10 +63,12 @@ export default function Home() {
     );
   }
 
-  if (!status.wallet) {
+  const { network } = status.health;
+  const { accounts, active } = status.accounts;
+  if (!active) {
     return (
       <main className="flex flex-1 flex-col">
-        <WalletSetup network={status.health.network} onReady={setWallet} />
+        <WalletSetup network={network} onReady={() => reload(network)} />
       </main>
     );
   }
@@ -66,7 +78,14 @@ export default function Home() {
     // a lighter backdrop; on a phone it simply fills the screen.
     <main className="flex flex-1 justify-center sm:bg-zinc-800/60 sm:px-4 sm:py-16">
       <div className="w-full max-w-md bg-background px-4 py-6 sm:min-h-[640px] sm:self-start sm:rounded-3xl sm:border sm:border-zinc-800 sm:px-6 sm:shadow-2xl">
-        <WalletView wallet={status.wallet} onForget={() => setWallet(undefined)} />
+        {/* Keyed by account, so switching starts the dashboard fresh for that account. */}
+        <WalletView
+          key={active.walletId}
+          wallet={active}
+          accounts={accounts}
+          onSwitch={switchTo}
+          onAccountsChanged={() => reload(network)}
+        />
       </div>
     </main>
   );

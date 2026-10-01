@@ -1,23 +1,23 @@
 //! BIP84 key derivation: mnemonic -> account key -> output descriptors.
 //!
-//! The mnemonic is the root of every key it can ever produce (all accounts, all coins). A
-//! wallet only needs one branch of that tree, the account key at m/84'/1'/0', so that's the
-//! only secret we keep: if it leaks, the rest of the tree stays safe.
+//! The mnemonic is the root of every key it can ever produce (all accounts, all coins). Each
+//! account only needs its own branch of that tree, the account key at m/84'/1'/n', so that's
+//! the only secret we keep: if it leaks, the rest of the tree stays safe.
 
 use std::str::FromStr;
 
+use anyhow::{Context, anyhow, bail};
 use bdk_wallet::KeychainKind;
 use bdk_wallet::bitcoin::NetworkKind;
-use anyhow::bail;
-use bdk_wallet::bitcoin::bip32::{DerivationPath, Fingerprint, Xpriv};
+use bdk_wallet::bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpriv};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::descriptor::ExtendedDescriptor;
-use anyhow::anyhow;
 use bdk_wallet::keys::bip39::{self, Language, Mnemonic};
 use bdk_wallet::miniscript::descriptor::{DescriptorSecretKey, DescriptorXKey, KeyMap, Wildcard};
 
-/// BIP84 account path: purpose 84' (native SegWit) / coin type 1' (test networks) / account 0'.
-const ACCOUNT_PATH: &str = "m/84h/1h/0h";
+/// BIP84 account paths: purpose 84' (native SegWit) / coin type 1' (test networks) /
+/// account n' (0 for the first account).
+const BIP84_TESTNET: [u32; 2] = [84, 1];
 
 /// Parses a recovery phrase as typed: any spacing, any case. Errors are worded for people,
 /// counting words from 1 (the bip39 crate counts from 0).
@@ -40,14 +40,23 @@ pub fn parse_mnemonic(phrase: &str) -> anyhow::Result<Mnemonic> {
     })
 }
 
-/// Derives the account key from the mnemonic, as `[fingerprint/84'/1'/0']tprv…`. The origin
-/// in brackets (master key fingerprint + path) is what lets a signer match a PSBT input's
-/// BIP32 derivation info to this key.
+/// The first account's key; see `account_key_at`.
 pub fn account_key(mnemonic: &Mnemonic) -> anyhow::Result<String> {
+    account_key_at(mnemonic, 0)
+}
+
+/// Derives account `account`'s key from the mnemonic, as `[fingerprint/84'/1'/n']tprv…`. The
+/// origin in brackets (master key fingerprint + path) is what lets a signer match a PSBT
+/// input's BIP32 derivation info to this key, and shows which wallet the account belongs to.
+pub fn account_key_at(mnemonic: &Mnemonic, account: u32) -> anyhow::Result<String> {
     let secp = Secp256k1::new();
     // Empty BIP39 passphrase. NetworkKind::Test makes it a tprv, used by every test network.
     let master = Xpriv::new_master(NetworkKind::Test, &mnemonic.to_seed(""))?;
-    let path = DerivationPath::from_str(ACCOUNT_PATH)?;
+    let mut path = Vec::new();
+    for index in [BIP84_TESTNET[0], BIP84_TESTNET[1], account] {
+        path.push(ChildNumber::from_hardened_idx(index).context("account number too large")?);
+    }
+    let path = DerivationPath::from(path);
     let key = DescriptorSecretKey::XPrv(DescriptorXKey {
         origin: Some((master.fingerprint(&secp), path.clone())),
         xkey: master.derive_priv(&secp, &path)?,
@@ -126,6 +135,17 @@ mod tests {
     }
 
     #[test]
+    fn accounts_are_separate_branches_of_one_seed() {
+        let first = account_key_at(&mnemonic(), 0).unwrap();
+        let second = account_key_at(&mnemonic(), 1).unwrap();
+        assert_eq!(first, account_key(&mnemonic()).unwrap());
+        assert!(second.starts_with("[73c5da0a/84'/1'/1']tprv"), "{second}");
+        assert_ne!(first, second);
+        // Same master fingerprint: both belong to this seed.
+        assert_eq!(parse_account_key(&first).unwrap().0, parse_account_key(&second).unwrap().0);
+    }
+
+    #[test]
     fn account_key_has_origin() {
         let key = account_key(&mnemonic()).unwrap();
         assert!(key.starts_with("[73c5da0a/84'/1'/0']tprv"), "{key}");
@@ -145,7 +165,7 @@ mod tests {
 
         let account = account_key(&mnemonic()).unwrap();
         for (keychain, branch) in [(KeychainKind::External, 0), (KeychainKind::Internal, 1)] {
-            let path = DerivationPath::from_str(&format!("{ACCOUNT_PATH}/{branch}")).unwrap();
+            let path = DerivationPath::from_str(&format!("m/84h/1h/0h/{branch}")).unwrap();
             let (old, _) = descriptor!(wpkh(((mnemonic(), None::<String>), path)))
                 .unwrap()
                 .into_wallet_descriptor(&Secp256k1::new(), NetworkKind::Test)

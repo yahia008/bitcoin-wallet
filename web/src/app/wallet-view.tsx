@@ -12,15 +12,31 @@ import {
   type Balance,
   type Transaction,
 } from "@/lib/api";
-import { explorerTxUrl, formatBtcShort } from "@/lib/format";
-import { forgetStoredWallet, type StoredWallet } from "@/lib/store";
-import { verifyReceiveAddress } from "@/lib/wallet";
+import { explorerAddressUrl, explorerTxUrl, formatBtcShort } from "@/lib/format";
+import { setUpAccount } from "@/lib/accounts";
+import { forgetAccounts, saveAccount, type StoredWallet } from "@/lib/store";
+import { checkPassword, verifyReceiveAddress } from "@/lib/wallet";
 
-import { ArrowDownIcon, ArrowUpIcon, BackIcon, CloseIcon, DotsIcon, RefreshIcon } from "./icons";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  BackIcon,
+  CheckIcon,
+  ChevronIcon,
+  CloseIcon,
+  CopyIcon,
+  DotsIcon,
+  ExternalLinkIcon,
+  PencilIcon,
+  PlusCircleIcon,
+  PlusIcon,
+  QrIcon,
+  RefreshIcon,
+} from "./icons";
 import { Logo } from "./logo";
 import { Send } from "./send";
 import { SpeedUp } from "./speed-up";
-import { Button, Card } from "./wallet-setup";
+import { Button, Card, ImportPhrase } from "./wallet-setup";
 
 type Loaded = { balance: Balance; transactions: Transaction[] };
 
@@ -33,12 +49,25 @@ async function fetchOverview(wallet: StoredWallet): Promise<Loaded> {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-type View = "home" | "send" | "receive" | "settings";
+type View = "home" | "send" | "receive" | "settings" | "wallets" | "add-wallet" | "add-account";
 
 /** The loaded wallet, as a dashboard: balance and actions up top, activity below; Receive,
  * Send and settings open as their own screens. Only sending needs the password; the rest is
  * public data from the server. */
-export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForget: () => void }) {
+export function WalletView({
+  wallet,
+  accounts,
+  onSwitch,
+  onAccountsChanged,
+}: {
+  /** The active account. */
+  wallet: StoredWallet;
+  /** All accounts of this wallet in the browser. */
+  accounts: StoredWallet[];
+  onSwitch: (account: StoredWallet) => void;
+  /** An account was added, or the wallet forgotten: reload from storage. */
+  onAccountsChanged: () => void;
+}) {
   const [view, setView] = useState<View>("home");
   const [data, setData] = useState<Loaded>();
   const [loading, setLoading] = useState(true);
@@ -83,7 +112,39 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
   if (view === "settings") {
     return (
       <Screen title="Wallet" onBack={home}>
-        <Settings wallet={wallet} onForget={onForget} />
+        <Settings wallet={wallet} accounts={accounts} onForget={onAccountsChanged} />
+      </Screen>
+    );
+  }
+  if (view === "wallets") {
+    return (
+      <WalletsScreen
+        active={wallet}
+        accounts={accounts}
+        onClose={home}
+        onSwitch={onSwitch}
+        onReceive={() => setView("receive")}
+        onAdd={() => setView("add-wallet")}
+        onRenamed={onAccountsChanged}
+      />
+    );
+  }
+  if (view === "add-wallet") {
+    return (
+      <Screen title="Add wallet" onBack={() => setView("wallets")}>
+        <AddWalletChoice onCreate={() => setView("add-account")} />
+      </Screen>
+    );
+  }
+  if (view === "add-account") {
+    return (
+      <Screen title="Add account" onBack={() => setView("add-wallet")}>
+        <AddAccount
+          wallet={wallet}
+          accounts={accounts}
+          onAdded={onAccountsChanged}
+          onBack={() => setView("add-wallet")}
+        />
       </Screen>
     );
   }
@@ -101,10 +162,7 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
       </div>
 
       <div className="mt-8 flex flex-col items-center text-center">
-        <p className="flex items-center gap-2 text-sm text-zinc-400">
-          <Logo className="h-4 w-4" />
-          Wallet · {wallet.walletId.slice(0, 4)}…{wallet.walletId.slice(-4)}
-        </p>
+        <AccountButton active={wallet} onClick={() => setView("wallets")} />
         <p className="mt-3 text-4xl font-semibold tabular-nums tracking-tight">
           {balance ? formatBtcShort(balance.total_sat) : "—"}
           <span className="ml-2 text-xl text-zinc-400">BTC</span>
@@ -373,23 +431,372 @@ function Addresses({ wallet, version }: { wallet: StoredWallet; version: number 
   );
 }
 
-function Settings({ wallet, onForget }: { wallet: StoredWallet; onForget: () => void }) {
+/** "Account 1 ▾" on the dashboard: opens the Wallets screen. */
+function AccountButton({ active, onClick }: { active: StoredWallet; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-2 rounded-full px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800/60"
+    >
+      <Logo className="h-4 w-4" />
+      {active.name}
+      <ChevronIcon />
+    </button>
+  );
+}
+
+/** A round avatar for an account: the ₿ mark, tinted, with a ✓ badge when active. */
+function Avatar({ active, large }: { active?: boolean; large?: boolean }) {
+  return (
+    <span
+      className={`relative flex shrink-0 items-center justify-center rounded-full bg-violet-500/15 text-violet-300 ${
+        large ? "h-16 w-16" : "h-11 w-11"
+      }`}
+    >
+      <Logo className={large ? "h-8 w-8" : "h-5 w-5"} />
+      {active && (
+        <span className="absolute -right-0.5 -bottom-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2 border-[var(--background)] bg-violet-500 text-white">
+          <CheckIcon className="h-3 w-3" />
+        </span>
+      )}
+    </span>
+  );
+}
+
+const shortId = (id: string) => `${id.slice(0, 4)}…${id.slice(-4)}`;
+
+/** Every account's balance, fetched in parallel: sats, "error", or missing while loading. */
+function useBalances(accounts: StoredWallet[]): Record<string, number | "error"> {
+  const [balances, setBalances] = useState<Record<string, number | "error">>({});
+  useEffect(() => {
+    let current = true;
+    for (const account of accounts) {
+      getBalance(account).then(
+        (b) => current && setBalances((all) => ({ ...all, [account.walletId]: b.total_sat })),
+        // Shown as "—"; the account's own dashboard shows the details.
+        () => current && setBalances((all) => ({ ...all, [account.walletId]: "error" })),
+      );
+    }
+    return () => {
+      current = false;
+    };
+  }, [accounts]);
+  return balances;
+}
+
+/** Freighter-style account overview: the active account with quick actions (QR, copy
+ * address, explorer, rename), all accounts with balances, and "Add wallet". */
+function WalletsScreen({
+  active,
+  accounts,
+  onClose,
+  onSwitch,
+  onReceive,
+  onAdd,
+  onRenamed,
+}: {
+  active: StoredWallet;
+  accounts: StoredWallet[];
+  onClose: () => void;
+  onSwitch: (account: StoredWallet) => void;
+  onReceive: () => void;
+  onAdd: () => void;
+  onRenamed: () => void;
+}) {
+  const balances = useBalances(accounts);
+  const [address, setAddress] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [name, setName] = useState(active.name);
+  const [error, setError] = useState<string>();
+
+  // The active account's current receive address, for Copy and the explorer link.
+  useEffect(() => {
+    let current = true;
+    currentReceiveAddress(active).then(
+      (info) => current && setAddress(info.address),
+      (e) => current && setError(message(e)),
+    );
+    return () => {
+      current = false;
+    };
+  }, [active]);
+
+  async function copy() {
+    if (!address) return;
+    await navigator.clipboard.writeText(address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function rename() {
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== active.name) {
+      await saveAccount({ ...active, name: trimmed.slice(0, 32) });
+      onRenamed();
+    }
+    setRenaming(false);
+  }
+
+  const explorer = address && explorerAddressUrl(active.network, address);
+
+  return (
+    <div className="flex min-h-[560px] flex-col">
+      <div className="grid grid-cols-[2.5rem_1fr_2.5rem] items-center">
+        <IconButton label="Close" onClick={onClose}>
+          <CloseIcon />
+        </IconButton>
+        <h1 className="text-center text-lg font-semibold">Wallets</h1>
+      </div>
+
+      <div className="mt-6 flex flex-col items-center text-center">
+        <Avatar large />
+        {renaming ? (
+          <input
+            autoFocus
+            aria-label="Account name"
+            className="mt-3 h-9 w-48 rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 text-center text-lg focus:outline-none"
+            value={name}
+            maxLength={32}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={rename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") rename();
+              if (e.key === "Escape") {
+                setName(active.name);
+                setRenaming(false);
+              }
+            }}
+          />
+        ) : (
+          <p className="mt-3 text-lg">{active.name}</p>
+        )}
+        <p className="font-mono text-sm text-zinc-500">
+          {address ? `${address.slice(0, 6)}…${address.slice(-4)}` : shortId(active.walletId)}
+        </p>
+        <div className="mt-4 flex gap-3">
+          <RoundAction label="Show QR code" onClick={onReceive}>
+            <QrIcon />
+          </RoundAction>
+          <RoundAction
+            label={copied ? "Copied" : "Copy address"}
+            onClick={copy}
+            disabled={!address}
+          >
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </RoundAction>
+          <RoundAction
+            label="View on block explorer"
+            onClick={() => explorer && window.open(explorer, "_blank", "noreferrer")}
+            disabled={!explorer}
+          >
+            <ExternalLinkIcon />
+          </RoundAction>
+          <RoundAction label="Rename" onClick={() => setRenaming(true)}>
+            <PencilIcon />
+          </RoundAction>
+        </div>
+        <p className="mt-2 h-4 text-xs text-zinc-500">
+          {error ??
+            (copied
+              ? "Address copied"
+              : !explorer && address
+                ? "No explorer for this network"
+                : "")}
+        </p>
+      </div>
+
+      <ul className="mt-4 flex-1 border-t border-zinc-800 pt-2">
+        {accounts.map((a) => {
+          const sats = balances[a.walletId];
+          return (
+            <li key={a.walletId}>
+              <button
+                onClick={() => (a.walletId === active.walletId ? onClose() : onSwitch(a))}
+                className="flex w-full items-center gap-3 rounded-xl px-2 py-3 text-left hover:bg-zinc-800/50"
+              >
+                <Avatar active={a.walletId === active.walletId} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-semibold">{a.name}</span>
+                  <span className="block font-mono text-xs text-zinc-500">
+                    {shortId(a.walletId)}
+                  </span>
+                </span>
+                <span className="shrink-0 text-sm tabular-nums">
+                  {sats === undefined
+                    ? "…"
+                    : sats === "error"
+                      ? "—"
+                      : `${formatBtcShort(sats)} BTC`}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      <button
+        onClick={onAdd}
+        className="mt-4 flex items-center gap-3 rounded-xl px-2 py-2 text-left font-semibold text-violet-300 hover:bg-zinc-800/50"
+      >
+        <span className="flex h-11 w-11 items-center justify-center rounded-full bg-violet-500/15">
+          <PlusIcon />
+        </span>
+        Add wallet
+      </button>
+    </div>
+  );
+}
+
+function RoundAction({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+      className="flex h-11 w-11 items-center justify-center rounded-full bg-zinc-800/70 text-zinc-300 transition-colors hover:bg-zinc-700 disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** "Add wallet": the ways to add an account. */
+function AddWalletChoice({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <button
+        onClick={onCreate}
+        className="rounded-2xl bg-zinc-800/50 p-5 text-left transition-colors hover:bg-zinc-800"
+      >
+        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-violet-500/15 text-violet-300">
+          <PlusCircleIcon />
+        </span>
+        <span className="mt-4 block font-semibold">Create a new wallet</span>
+        <span className="mt-1 block text-sm text-zinc-400">
+          Create a wallet from your recovery phrase
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/** Derives the next account (m/84'/1'/n') from the recovery phrase, which the browser doesn't
+ * keep, so it has to be typed again. The phrase must belong to this wallet, and the password
+ * must be the one the other accounts use. */
+function AddAccount({
+  wallet,
+  accounts,
+  onAdded,
+  onBack,
+}: {
+  wallet: StoredWallet;
+  accounts: StoredWallet[];
+  onAdded: () => void;
+  onBack: () => void;
+}) {
+  const next = Math.max(...accounts.map((a) => a.account)) + 1;
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function add(words: string) {
+    setBusy(true);
+    setError(undefined);
+    try {
+      // Same password for every account: check it against one we already have.
+      await checkPassword(wallet, password).catch(() => {
+        throw new Error("That's not your wallet password.");
+      });
+      const created = await setUpAccount(
+        words,
+        password,
+        wallet.network,
+        next,
+        wallet.masterFingerprint,
+      );
+      await saveAccount(created);
+      onAdded();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex justify-center">
+      <ImportPhrase
+        title={`Add Account ${next + 1}`}
+        subtitle="Osok doesn't keep your recovery phrase, so enter it again to create a new account from it. You can paste it in the first box."
+        actionLabel={`Add Account ${next + 1}`}
+        busyLabel="Adding…"
+        busy={busy}
+        error={error}
+        onImport={add}
+        onBack={onBack}
+        extraReady={password !== ""}
+        extra={
+          <input
+            type="password"
+            autoComplete="current-password"
+            placeholder="Wallet password"
+            className="mt-4 h-11 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={busy}
+          />
+        }
+      />
+    </div>
+  );
+}
+
+function Settings({
+  wallet,
+  accounts,
+  onForget,
+}: {
+  wallet: StoredWallet;
+  accounts: StoredWallet[];
+  onForget: () => void;
+}) {
   async function forget() {
+    const what =
+      accounts.length === 1 ? "this wallet" : `this wallet and all ${accounts.length} accounts`;
     const sure = window.confirm(
-      "Remove this wallet from this browser? Your coins are not affected: restore it any " +
-        "time with your recovery phrase.",
+      `Remove ${what} from this browser? Your coins are not affected: restore it any time ` +
+        "with your recovery phrase.",
     );
     if (sure) {
-      await forgetStoredWallet(wallet.network);
+      await forgetAccounts(wallet.network);
       onForget();
     }
   }
   return (
     <Card>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        <dt className="text-zinc-500">Account</dt>
+        <dd>
+          {wallet.name}{" "}
+          <span className="font-mono text-xs text-zinc-500">
+            m/84&apos;/1&apos;/{wallet.account}&apos;
+          </span>
+        </dd>
         <dt className="text-zinc-500">Network</dt>
         <dd>{wallet.network}</dd>
-        <dt className="text-zinc-500">Wallet id</dt>
+        <dt className="text-zinc-500">Account id</dt>
         <dd className="font-mono">{wallet.walletId}</dd>
         <dt className="text-zinc-500">Server</dt>
         <dd className="break-all font-mono">{wallet.apiUrl}</dd>
@@ -486,12 +893,19 @@ async function fetchReceive(
   wallet: StoredWallet,
   fresh: boolean,
 ): Promise<{ info: AddressInfo; qr: string }> {
-  const unused = fresh ? undefined : (await getAddresses(wallet)).filter((a) => !a.used).at(-1);
-  const info = unused ?? (await newAddress(wallet));
-  await verifyReceiveAddress(wallet, info);
+  const info = await currentReceiveAddress(wallet, fresh);
   // BIP21 URI, so phone wallets scanning it know it's a bitcoin address.
   const qr = await QRCode.toDataURL(`bitcoin:${info.address}`, { margin: 2, width: 440 });
   return { info, qr };
+}
+
+/** The newest unused receive address (or a new one if `fresh`, or if none is unused),
+ * checked against our own descriptor. */
+async function currentReceiveAddress(wallet: StoredWallet, fresh = false): Promise<AddressInfo> {
+  const unused = fresh ? undefined : (await getAddresses(wallet)).filter((a) => !a.used).at(-1);
+  const info = unused ?? (await newAddress(wallet));
+  await verifyReceiveAddress(wallet, info);
+  return info;
 }
 
 /** Shows an unused receive address (checked against our own descriptor) with a QR code. */

@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 
-import { API_URL, ApiError, register } from "@/lib/api";
-import { saveStoredWallet, type StoredWallet } from "@/lib/store";
-import { createWallet, loadWallet, recoverApiToken } from "@/lib/wallet";
+import { setUpAccount } from "@/lib/accounts";
+import { saveAccount, type StoredWallet } from "@/lib/store";
+import { loadWallet } from "@/lib/wallet";
 
 import { Logo } from "./logo";
 
@@ -253,34 +253,9 @@ function PhraseStep({
     setBusy(true);
     setError(undefined);
     try {
-      // Derives the account key and encrypts it, all in this browser.
-      const created = await createWallet(words, password, network);
-      // Only the public descriptors go to the server.
-      let apiToken: string;
-      try {
-        const registration = await register(created.external, created.internal);
-        if (registration.id !== created.walletId) {
-          throw new Error("the server computed a different wallet id; not saving");
-        }
-        apiToken = registration.token;
-      } catch (e) {
-        if (!(e instanceof ApiError && e.status === 409)) throw e;
-        // Already registered (e.g. restored after "Forget"): the server won't hand out the
-        // old token, so prove we hold the key and get a new one.
-        apiToken = await recoverApiToken(created, password);
-      }
-      const wallet: StoredWallet = {
-        walletId: created.walletId,
-        network: created.network,
-        external: created.external,
-        internal: created.internal,
-        firstAddress: created.firstAddress,
-        encryptedKey: created.encryptedKey,
-        apiUrl: API_URL,
-        apiToken,
-        createdAt: new Date().toISOString(),
-      };
-      await saveStoredWallet(wallet);
+      // The first account, m/84'/1'/0'. More can be added later from the dashboard.
+      const wallet = await setUpAccount(words, password, network, 0);
+      await saveAccount(wallet);
       onReady(wallet);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -336,18 +311,31 @@ function PhraseStep({
   );
 }
 
-/** "I already have a wallet": one box per word (12 or 24), hidden unless shown. Pasting the
- * whole phrase into a box fills them all. */
-function ImportPhrase({
+/** "I already have a wallet" (and "Add account"): one box per word (12 or 24), hidden unless
+ * shown. Pasting the whole phrase into a box fills them all. `extra` goes under the boxes,
+ * and `extraReady` must be true too before the action is enabled. */
+export function ImportPhrase({
   busy,
   error,
   onImport,
   onBack,
+  title = "Import wallet from recovery phrase",
+  subtitle = "Enter your mnemonic phrase to restore your wallet. You can also paste the phrase in the first box.",
+  actionLabel = "Import",
+  busyLabel = "Importing…",
+  extra,
+  extraReady = true,
 }: {
   busy: boolean;
   error?: string;
   onImport: (words: string) => void;
   onBack: () => void;
+  title?: string;
+  subtitle?: string;
+  actionLabel?: string;
+  busyLabel?: string;
+  extra?: React.ReactNode;
+  extraReady?: boolean;
 }) {
   const [count, setCount] = useState<12 | 24>(12);
   const [words, setWords] = useState<string[]>(() => Array(24).fill(""));
@@ -369,10 +357,7 @@ function ImportPhrase({
   }
 
   return (
-    <SetupCard
-      title="Import wallet from recovery phrase"
-      subtitle="Enter your mnemonic phrase to restore your wallet. You can also paste the phrase in the first box."
-    >
+    <SetupCard title={title} subtitle={subtitle}>
       <div className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-zinc-800 bg-zinc-950/60 p-5">
         {shown.map((word, i) => (
           <input
@@ -418,13 +403,14 @@ function ImportPhrase({
           {visible ? "Hide" : "Show"} <EyeIcon />
         </button>
       </div>
+      {extra}
       {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
       <button
         className="mt-8 h-11 w-full rounded-xl text-sm font-semibold transition-colors enabled:bg-zinc-100 enabled:text-zinc-900 enabled:hover:bg-white disabled:border disabled:border-zinc-800 disabled:text-zinc-500"
         onClick={() => onImport(shown.join(" "))}
-        disabled={!complete || busy}
+        disabled={!complete || !extraReady || busy}
       >
-        {busy ? "Importing…" : "Import"}
+        {busy ? busyLabel : actionLabel}
       </button>
       <button
         className="mt-3 w-full text-center text-sm text-zinc-400 hover:text-zinc-100 disabled:opacity-40"

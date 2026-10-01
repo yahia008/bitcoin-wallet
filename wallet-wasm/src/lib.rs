@@ -32,6 +32,11 @@ pub struct NewWallet {
     /// The API's id for this wallet (same as the CLI computes).
     wallet_id: String,
     network: String,
+    /// Which account of the seed this is: 0 for the first, m/84'/1'/n'.
+    account: u32,
+    /// The seed's master key fingerprint (hex). Every account of one seed shares it, so the
+    /// browser can tell whether a phrase belongs to the wallet it already has.
+    master_fingerprint: String,
     /// Public descriptors: what gets registered with the API.
     external: String,
     internal: String,
@@ -47,11 +52,16 @@ pub struct EncryptedKey {
     ciphertext: String,
 }
 
-/// Turns a recovery phrase into a wallet the browser can store: derives the account key,
-/// encrypts it with `password`, and returns the public parts alongside. Slow on purpose
-/// (Argon2id), about a second.
+/// Turns a recovery phrase into one account the browser can store: derives account
+/// `account`'s key (0 = the first), encrypts it with `password`, and returns the public
+/// parts alongside. Slow on purpose (Argon2id), a fraction of a second.
 #[wasm_bindgen(js_name = createWallet)]
-pub fn create_wallet(words: &str, password: &str, network: &str) -> Result<JsValue, JsError> {
+pub fn create_wallet(
+    words: &str,
+    password: &str,
+    network: &str,
+    account: u32,
+) -> Result<JsValue, JsError> {
     let network = parse_network(network)?;
     if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(JsError::new(&format!(
@@ -59,7 +69,8 @@ pub fn create_wallet(words: &str, password: &str, network: &str) -> Result<JsVal
         )));
     }
     let mnemonic = parse_mnemonic(words)?;
-    let account_key = keys::account_key(&mnemonic).map_err(js)?;
+    let account_key = keys::account_key_at(&mnemonic, account).map_err(js)?;
+    let (master_fingerprint, _, _) = keys::parse_account_key(&account_key).map_err(js)?;
     let wallet = public_wallet(&account_key, network)?;
     let external = wallet.public_descriptor(KeychainKind::External).to_string();
     let internal = wallet.public_descriptor(KeychainKind::Internal).to_string();
@@ -68,6 +79,8 @@ pub fn create_wallet(words: &str, password: &str, network: &str) -> Result<JsVal
     let new_wallet = NewWallet {
         wallet_id: wallet_id(&external, &internal),
         network: network.to_string(),
+        account,
+        master_fingerprint: master_fingerprint.to_string(),
         first_address: wallet.peek_address(KeychainKind::External, 0).address.to_string(),
         external,
         internal,
@@ -210,6 +223,14 @@ pub fn sign_psbt(wallet: JsValue, password: &str, psbt: &str) -> Result<String, 
     let account_key = stored.decrypt_key(password)?;
     sign::sign(&wallet, &account_key, &mut psbt).map_err(js)?;
     Ok(psbt.to_string())
+}
+
+/// Throws unless `password` unlocks this account's key. Used before adding an account, so
+/// every account of the wallet ends up under the same password.
+#[wasm_bindgen(js_name = checkPassword)]
+pub fn check_password(wallet: JsValue, password: &str) -> Result<(), JsError> {
+    let stored: StoredWallet = serde_wasm_bindgen::from_value(wallet)?;
+    stored.decrypt_key(password).map(|_| ())
 }
 
 /// Signs the server's token-recovery `challenge` with the wallet's key (decrypted with

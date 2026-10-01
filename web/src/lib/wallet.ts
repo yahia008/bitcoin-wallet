@@ -18,20 +18,29 @@ export function loadWallet(): Promise<typeof wasm> {
 export type NewWallet = {
   walletId: string;
   network: string;
+  account: number;
+  masterFingerprint: string;
   external: string;
   internal: string;
   firstAddress: string;
   encryptedKey: { salt: string; nonce: string; ciphertext: string };
 };
 
-/** Derives the account key from `words`, encrypts it with `password` (Argon2id, ~0.2 s),
- * and returns that plus the public parts. Throws on a bad phrase or short password. */
+/** Derives account `account`'s key (m/84'/1'/n', 0 = first) from `words`, encrypts it with
+ * `password` (Argon2id, ~0.2 s), and returns that plus the public parts. Throws on a bad
+ * phrase or short password. */
 export async function createWallet(
   words: string,
   password: string,
   network: string,
+  account = 0,
 ): Promise<NewWallet> {
-  return (await loadWallet()).createWallet(words, password, network);
+  return (await loadWallet()).createWallet(words, password, network, account);
+}
+
+/** Throws unless `password` unlocks `wallet`'s key. */
+export async function checkPassword(wallet: WalletKeys, password: string): Promise<void> {
+  (await loadWallet()).checkPassword(wallet, password);
 }
 
 /** Throws unless `address` really is the wallet's receive address at `index`, derived here

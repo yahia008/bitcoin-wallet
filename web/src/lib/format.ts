@@ -38,3 +38,9 @@ export function explorerTxUrl(network: string, txid: string): string | undefined
   const base = EXPLORERS[network];
   return base && `${base}/tx/${txid}`;
 }
+
+/** A block explorer page for the address, or undefined (e.g. on regtest). */
+export function explorerAddressUrl(network: string, address: string): string | undefined {
+  const base = EXPLORERS[network];
+  return base && `${base}/address/${address}`;
+}
