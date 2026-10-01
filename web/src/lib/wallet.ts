@@ -77,3 +77,26 @@ export async function reviewSend(
 export async function signPsbt(wallet: WalletKeys, password: string, psbt: string): Promise<string> {
   return (await loadWallet()).signPsbt(wallet, password, psbt);
 }
+
+/** What `reviewBump` found. */
+export type BumpReview = {
+  paidSat: number;
+  oldFeeSat: number;
+  oldFeeRate: number;
+  feeSat: number;
+  feeRate: number;
+  changeSat: number;
+  feeWarning?: string;
+};
+
+/** Runs the CLI's `review_bump` on a server-built replacement of `txid`: the original (hex,
+ * from the server) must really be `txid`, and the replacement must keep every payment exactly
+ * and pay more fee. Throws if not. */
+export async function reviewBump(
+  wallet: WalletKeys,
+  psbt: string,
+  originalTx: string,
+  txid: string,
+): Promise<BumpReview> {
+  return (await loadWallet()).reviewBump(wallet, psbt, originalTx, txid);
+}

@@ -4,7 +4,8 @@
 use std::str::FromStr;
 
 use bdk_wallet::bitcoin::hex::{DisplayHex, FromHex};
-use bdk_wallet::bitcoin::{Address, Amount, Network, Psbt};
+use bdk_wallet::bitcoin::consensus::encode::deserialize_hex;
+use bdk_wallet::bitcoin::{Address, Amount, Network, Psbt, Transaction, Txid};
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::{Descriptor, DescriptorPublicKey, Segwitv0};
@@ -133,6 +134,64 @@ pub fn review_send(
         change_sat: review.change.to_sat(),
         inputs: review.inputs,
         fee_rate: review::signed_fee_rate(&psbt.unsigned_tx, review.fee),
+        fee_warning,
+    };
+    Ok(serde_wasm_bindgen::to_value(&summary)?)
+}
+
+/// What the user must see before signing a fee bump, worked out from the PSBTs themselves.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BumpReview {
+    /// What the payments add up to; unchanged from the original.
+    paid_sat: u64,
+    old_fee_sat: u64,
+    /// The original is signed, so its rate is exact.
+    old_fee_rate: f64,
+    fee_sat: u64,
+    fee_rate: f64,
+    change_sat: u64,
+    fee_warning: Option<String>,
+}
+
+/// Checks a fee bump (RBF replacement) the server built for our transaction `txid`, given the
+/// original transaction (hex) the server sent along: the CLI's `review_bump`. The original's
+/// txid must be `txid` (a txid is a hash of the transaction, so the server can't doctor it);
+/// the replacement must spend all its coins, pay every payment exactly as before, send the
+/// rest only to our change, and pay a higher fee. Throws if not.
+#[wasm_bindgen(js_name = reviewBump)]
+pub fn review_bump(
+    wallet: JsValue,
+    psbt: &str,
+    original_tx: &str,
+    txid: &str,
+) -> Result<JsValue, JsError> {
+    let stored: StoredWallet = serde_wasm_bindgen::from_value(wallet)?;
+    let network = parse_network(&stored.network)?;
+    let wallet = stored.watch_only(network)?;
+    let psbt = Psbt::from_str(psbt).map_err(|e| JsError::new(&format!("invalid PSBT: {e}")))?;
+    let txid = Txid::from_str(txid).map_err(|_| JsError::new("invalid txid"))?;
+    let original: Transaction = deserialize_hex(original_tx)
+        .map_err(|_| JsError::new("the server sent an invalid original transaction"))?;
+    if original.compute_txid() != txid {
+        return Err(JsError::new(&format!(
+            "the server sent a different transaction than {txid}"
+        )));
+    }
+
+    let (review, old_fee) = review::review_bump(&wallet, &psbt, &original).map_err(js)?;
+    let output_total: Amount = psbt.unsigned_tx.output.iter().map(|o| o.value).sum();
+    let paid = output_total - review.change;
+    let fee_warning = review::check_fee(&psbt.unsigned_tx, paid, review.fee)
+        .err()
+        .map(|e| e.to_string());
+    let summary = BumpReview {
+        paid_sat: paid.to_sat(),
+        old_fee_sat: old_fee.to_sat(),
+        old_fee_rate: old_fee.to_sat() as f64 / original.vsize() as f64,
+        fee_sat: review.fee.to_sat(),
+        fee_rate: review::signed_fee_rate(&psbt.unsigned_tx, review.fee),
+        change_sat: review.change.to_sat(),
         fee_warning,
     };
     Ok(serde_wasm_bindgen::to_value(&summary)?)

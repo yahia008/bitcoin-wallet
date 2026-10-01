@@ -122,3 +122,22 @@ export const buildPsbt = (w: WalletAuth, req: PsbtRequest) =>
 /** Sends a signed PSBT; the server finalizes and broadcasts it. */
 export const broadcast = (w: WalletAuth, psbt: string) =>
   walletRequest<{ txid: string }>(w, "/broadcast", "POST", { psbt });
+
+export type BumpRequest = {
+  txid: string;
+  /** Exact sat/vB; omit for the server's choice (fast estimate, at least old rate + 1). */
+  fee_rate_sat_vb?: number;
+};
+
+/** An unsigned replacement PSBT plus the original transaction (hex), so the browser can check
+ * one against the other with `reviewBump` (lib/wallet.ts). */
+export type BumpResponse = {
+  psbt: string;
+  original_tx: string;
+  fee_sat: number;
+  fee_rate_sat_vb: number;
+};
+
+/** Asks for a fee bump (RBF) of one of our unconfirmed transactions. */
+export const bumpFee = (w: WalletAuth, req: BumpRequest) =>
+  walletRequest<BumpResponse>(w, "/bump", "POST", req);

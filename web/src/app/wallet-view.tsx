@@ -17,6 +17,7 @@ import { forgetStoredWallet, type StoredWallet } from "@/lib/store";
 import { verifyReceiveAddress } from "@/lib/wallet";
 
 import { Send } from "./send";
+import { SpeedUp } from "./speed-up";
 import { Button, Card } from "./wallet-setup";
 
 type Loaded = { balance: Balance; transactions: Transaction[] };
@@ -107,7 +108,7 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
         {data && data.transactions.length > 0 && (
           <ul className="divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
             {data.transactions.map((tx) => (
-              <TxRow key={tx.txid} tx={tx} network={wallet.network} />
+              <TxRow key={tx.txid} tx={tx} wallet={wallet} onChanged={refresh} />
             ))}
           </ul>
         )}
@@ -130,36 +131,65 @@ export function WalletView({ wallet, onForget }: { wallet: StoredWallet; onForge
   );
 }
 
-function TxRow({ tx, network }: { tx: Transaction; network: string }) {
-  const url = explorerTxUrl(network, tx.txid);
+function TxRow({
+  tx,
+  wallet,
+  onChanged,
+}: {
+  tx: Transaction;
+  wallet: StoredWallet;
+  onChanged: () => void;
+}) {
+  const [speedingUp, setSpeedingUp] = useState(false);
+  const url = explorerTxUrl(wallet.network, tx.txid);
   const received = tx.net_sat >= 0;
+  // Only transactions we paid the fee for (we sent them), and only while unconfirmed.
+  const canSpeedUp = !tx.confirmed && tx.fee_sat !== null;
   return (
-    <li className="flex items-center justify-between gap-4 py-2">
-      <div className="min-w-0">
-        <p className="truncate font-mono text-xs">
-          {url ? (
-            <a href={url} target="_blank" rel="noreferrer" className="underline">
-              {tx.txid}
-            </a>
-          ) : (
-            tx.txid
-          )}
-        </p>
-        <p className="text-xs text-zinc-500">
-          {tx.confirmed
-            ? `${tx.confirmations} confirmation${tx.confirmations === 1 ? "" : "s"}`
-            : "Unconfirmed"}
-          {tx.fee_sat !== null && ` · fee ${formatBtc(tx.fee_sat)}`}
+    <li className="py-2">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="truncate font-mono text-xs">
+            {url ? (
+              <a href={url} target="_blank" rel="noreferrer" className="underline">
+                {tx.txid}
+              </a>
+            ) : (
+              tx.txid
+            )}
+          </p>
+          <p className="text-xs text-zinc-500">
+            {tx.confirmed
+              ? `${tx.confirmations} confirmation${tx.confirmations === 1 ? "" : "s"}`
+              : "Unconfirmed"}
+            {tx.fee_sat !== null && ` · fee ${formatBtc(tx.fee_sat)}`}
+          </p>
+        </div>
+        <p
+          className={`shrink-0 font-mono tabular-nums ${
+            received ? "text-green-700 dark:text-green-400" : ""
+          }`}
+        >
+          {received ? "+" : ""}
+          {formatBtc(tx.net_sat)}
         </p>
       </div>
-      <p
-        className={`shrink-0 font-mono tabular-nums ${
-          received ? "text-green-700 dark:text-green-400" : ""
-        }`}
-      >
-        {received ? "+" : ""}
-        {formatBtc(tx.net_sat)}
-      </p>
+      {canSpeedUp && !speedingUp && (
+        <button className="mt-1 text-xs underline" onClick={() => setSpeedingUp(true)}>
+          Speed up
+        </button>
+      )}
+      {speedingUp && (
+        <SpeedUp
+          wallet={wallet}
+          txid={tx.txid}
+          onCancel={() => setSpeedingUp(false)}
+          onDone={() => {
+            setSpeedingUp(false);
+            onChanged();
+          }}
+        />
+      )}
     </li>
   );
 }
