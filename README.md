@@ -114,9 +114,9 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 
 Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--sync-interval-secs` (default 30): a wallet synced that recently isn't synced again, so a web page load costs one chain scan instead of three, and public Esplora rate limits (blockstream.info: 700 requests/hour) aren't hit; 0 syncs on every request. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
 
-## Web wallet (in progress)
+## Web wallet (Osok)
 
-`web/` is a Next.js + TypeScript + Tailwind app that will do what the CLI does, in the browser: keys stay in the browser, which talks to the same API server. It builds to static files (`output: "export"`), so there's no Next.js server that could ever see a secret.
+`web/` is Osok, a Next.js + TypeScript + Tailwind app that will do what the CLI does, in the browser: keys stay in the browser, which talks to the same API server. It builds to static files (`output: "export"`), so there's no Next.js server that could ever see a secret.
 
 The browser runs the same Rust code as the CLI: `wallet-core` (keys, PSBT review, signing) compiled to WebAssembly through the thin `wallet-wasm` bindings crate. Building it needs `wasm-pack` (`cargo install wasm-pack`) and `clang` (`sudo apt install clang`, for secp256k1's C code); `npm run dev` and `npm run build` build it first.
 

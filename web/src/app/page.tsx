@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { API_URL, health, type Health } from "@/lib/api";
 import { loadStoredWallet, type StoredWallet } from "@/lib/store";
 
-import { WalletSetup } from "./wallet-setup";
+import { Logo } from "./logo";
+import { Card, WalletSetup } from "./wallet-setup";
 import { WalletView } from "./wallet-view";
 
 type Status =
@@ -30,36 +31,48 @@ export default function Home() {
     setStatus((s) => (s.kind === "ok" ? { ...s, wallet } : s));
   }
 
+  if (status.kind === "checking") {
+    return (
+      <main className="flex flex-1 items-center justify-center">
+        <Logo className="h-12 w-12 animate-pulse" />
+      </main>
+    );
+  }
+
+  if (status.kind === "error") {
+    return (
+      <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 px-4">
+        <Logo className="h-12 w-12 opacity-60" />
+        <Card title="Can't reach the wallet server">
+          <p className="text-sm text-zinc-400">
+            {status.message}. Is the server running at <span className="font-mono">{API_URL}</span>,
+            with CORS allowing this page?
+          </p>
+        </Card>
+      </main>
+    );
+  }
+
+  if (!status.wallet) {
+    return (
+      <main className="flex flex-1 flex-col">
+        <WalletSetup network={status.health.network} onReady={setWallet} />
+      </main>
+    );
+  }
+
   return (
-    <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-16">
-      <h1 className="text-3xl font-semibold tracking-tight">Bitcoin Wallet</h1>
-      <p className="text-zinc-600 dark:text-zinc-400">
-        Non-custodial: your keys stay in this browser. The server only sees public keys.
-      </p>
-
-      <section className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-        <h2 className="mb-2 font-medium">API server</h2>
-        <p className="font-mono text-sm text-zinc-500">{API_URL}</p>
-        {status.kind === "checking" && <p className="mt-2">Checking…</p>}
-        {status.kind === "ok" && (
-          <p className="mt-2 text-green-700 dark:text-green-400">
-            Connected · network <strong>{status.health.network}</strong>
-          </p>
-        )}
-        {status.kind === "error" && (
-          <p className="mt-2 text-red-700 dark:text-red-400">
-            Can&apos;t reach it: {status.message}. Is the server running with CORS allowing
-            this page?
-          </p>
-        )}
-      </section>
-
-      {status.kind === "ok" &&
-        (status.wallet ? (
-          <WalletView wallet={status.wallet} onForget={() => setWallet(undefined)} />
-        ) : (
-          <WalletSetup network={status.health.network} onReady={setWallet} />
-        ))}
+    <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-8">
+      <header className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Logo className="h-8 w-8" />
+          <span className="text-lg font-semibold tracking-tight">Osok</span>
+        </div>
+        <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-400">
+          {status.health.network}
+        </span>
+      </header>
+      <WalletView wallet={status.wallet} onForget={() => setWallet(undefined)} />
     </main>
   );
 }

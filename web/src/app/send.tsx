@@ -14,8 +14,7 @@ type Step =
   | { kind: "review"; to: string; amountSat: number; psbt: string; review: SendReview }
   | { kind: "sent"; txid: string };
 
-const input =
-  "w-full rounded border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700";
+const input = "w-full rounded-lg border border-zinc-700 bg-transparent p-2 text-sm";
 
 /** Pay someone: the server builds an unsigned PSBT, this browser checks it with the CLI's
  * review code, and signs it locally once the user enters their password. */
@@ -104,8 +103,7 @@ export function Send({ wallet, onSent }: { wallet: StoredWallet; onSent: () => v
     return (
       <Card title="Check and sign">
         <p className="mb-2 text-sm text-green-700 dark:text-green-400">
-          Verified in this browser: pays exactly the recipient, everything else comes back to
-          you.
+          Verified in this browser: pays exactly the recipient, everything else comes back to you.
         </p>
         <dl className="mb-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm tabular-nums">
           <dt className="text-zinc-500">To</dt>
@@ -125,13 +123,11 @@ export function Send({ wallet, onSent }: { wallet: StoredWallet; onSent: () => v
           <label className="mb-3 flex items-start gap-2 text-sm text-red-700 dark:text-red-400">
             <input
               type="checkbox"
-              className="mt-1"
+              className="mt-1 accent-violet-500"
               checked={allowHighFee}
               onChange={(e) => setAllowHighFee(e.target.checked)}
             />
-            <span>
-              The fee looks like a mistake: {review.feeWarning}. Tick to send anyway.
-            </span>
+            <span>The fee looks like a mistake: {review.feeWarning}. Tick to send anyway.</span>
           </label>
         )}
         <input

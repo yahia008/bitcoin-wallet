@@ -9,7 +9,7 @@ import { reviewBump, signPsbt, type BumpReview } from "@/lib/wallet";
 
 import { Button } from "./wallet-setup";
 
-const input = "rounded border border-zinc-300 bg-transparent p-2 text-sm dark:border-zinc-700";
+const input = "rounded-lg border border-zinc-700 bg-transparent p-2 text-sm";
 
 /** Replaces one of our unconfirmed transactions with a higher-fee copy (RBF). The server
  * builds it; this browser checks it against the original and signs it. */
@@ -63,7 +63,7 @@ export function SpeedUp({
       onDone();
     });
 
-  const box = "mt-2 rounded border border-zinc-200 p-3 dark:border-zinc-800";
+  const box = "mt-2 rounded-xl border border-zinc-800 p-3";
 
   if (!prepared) {
     return (
@@ -118,7 +118,7 @@ export function SpeedUp({
         <label className="mb-3 flex items-start gap-2 text-xs text-red-700 dark:text-red-400">
           <input
             type="checkbox"
-            className="mt-0.5"
+            className="mt-0.5 accent-violet-500"
             checked={allowHighFee}
             onChange={(e) => setAllowHighFee(e.target.checked)}
           />
