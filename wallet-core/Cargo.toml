@@ -1,0 +1,13 @@
+[package]
+name = "wallet-core"
+version = "0.1.0"
+edition = "2024"
+description = "Wallet logic with no I/O (keys, PSBT review, signing), shared by the CLI, the server and the browser (WASM)"
+
+[dependencies]
+anyhow = "1.0.104"
+bdk_wallet = { version = "3.2.0", features = ["keys-bip39"] }
+
+# In the browser, randomness (for new mnemonics, nonces) comes from crypto.getRandomValues.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

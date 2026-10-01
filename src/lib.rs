@@ -4,9 +4,10 @@ pub mod api;
 pub mod chain;
 pub mod client;
 pub mod history;
-pub mod keys;
 pub mod secret;
 pub mod send;
+
+pub use wallet_core::keys;
 
 use std::path::Path;
 
