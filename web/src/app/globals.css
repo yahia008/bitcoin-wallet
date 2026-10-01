@@ -20,3 +20,9 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+/* Long lists (activity, addresses) scroll inside their box with a slim dark scrollbar. */
+.scroll-list {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}

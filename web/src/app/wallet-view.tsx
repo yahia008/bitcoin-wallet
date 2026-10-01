@@ -372,7 +372,7 @@ function Activity({
     );
   }
   return (
-    <ul className="divide-y divide-zinc-800">
+    <ul className="scroll-list max-h-[420px] divide-y divide-zinc-800 overflow-y-auto pr-1">
       {transactions.map((tx) => (
         <TxRow key={tx.txid} tx={tx} wallet={wallet} onChanged={onChanged} />
       ))}
@@ -412,7 +412,8 @@ function Addresses({ wallet, version }: { wallet: StoredWallet; version: number 
     return <p className="py-8 text-center text-sm text-zinc-500">No addresses yet.</p>;
   }
   return (
-    <ul className="divide-y divide-zinc-800">
+    // Address rows are shorter than activity rows, so a smaller box still shows about six.
+    <ul className="scroll-list max-h-[320px] divide-y divide-zinc-800 overflow-y-auto pr-1">
       {rows.map((a) => (
         <li key={a.index} className="flex items-center justify-between gap-4 py-3">
           <div className="min-w-0">
