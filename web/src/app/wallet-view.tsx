@@ -34,6 +34,7 @@ import {
   RefreshIcon,
 } from "./icons";
 import { Logo } from "./logo";
+import { PasswordCard } from "./password-card";
 import { Send } from "./send";
 import { SpeedUp } from "./speed-up";
 import { Button, Card, ImportPhrase } from "./wallet-setup";
@@ -713,18 +714,30 @@ function AddAccount({
   onBack: () => void;
 }) {
   const next = Math.max(...accounts.map((a) => a.account)) + 1;
-  const [password, setPassword] = useState("");
+  // Set once the password is checked; then the recovery phrase is asked for.
+  const [password, setPassword] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  async function add(words: string) {
+  async function verify(candidate: string) {
     setBusy(true);
     setError(undefined);
     try {
       // Same password for every account: check it against one we already have.
-      await checkPassword(wallet, password).catch(() => {
-        throw new Error("That's not your wallet password.");
-      });
+      await checkPassword(wallet, candidate);
+      setPassword(candidate);
+    } catch {
+      setError("That's not your wallet password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function add(words: string) {
+    if (!password) return;
+    setBusy(true);
+    setError(undefined);
+    try {
       const created = await setUpAccount(
         words,
         password,
@@ -741,6 +754,22 @@ function AddAccount({
     }
   }
 
+  if (!password) {
+    return (
+      <div className="pt-8">
+        <PasswordCard
+          subtitle="Enter your wallet password to verify it's you."
+          actionLabel="Continue"
+          busyLabel="Checking…"
+          busy={busy}
+          error={error}
+          onSubmit={verify}
+          onCancel={onBack}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex justify-center">
       <ImportPhrase
@@ -752,18 +781,6 @@ function AddAccount({
         error={error}
         onImport={add}
         onBack={onBack}
-        extraReady={password !== ""}
-        extra={
-          <input
-            type="password"
-            autoComplete="current-password"
-            placeholder="Wallet password"
-            className="mt-4 h-11 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={busy}
-          />
-        }
       />
     </div>
   );

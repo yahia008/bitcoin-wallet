@@ -15,14 +15,13 @@ import {
   ChevronRightIcon,
   CloseIcon,
   DoubleChevronDownIcon,
-  EyeIcon,
-  EyeOffIcon,
   FeeIcon,
   GearIcon,
   ListIcon,
   UserIcon,
 } from "./icons";
 import { Logo } from "./logo";
+import { PasswordCard } from "./password-card";
 
 /** What the user chose to send: an exact amount, or everything ("Max"). */
 type Amount = { kind: "exact"; sats: number } | { kind: "all" };
@@ -465,8 +464,6 @@ function ReviewStep({
   const [asking, setAsking] = useState(false); // false: summary; true: password
   const [details, setDetails] = useState(false);
   const detailsRef = useRef<HTMLDListElement>(null);
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
   const [allowHighFee, setAllowHighFee] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -478,13 +475,12 @@ function ReviewStep({
     if (details) detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [details]);
 
-  async function signAndSend() {
+  async function signAndSend(password: string) {
     setBusy(true);
     setError(undefined);
     try {
       const signed = await signPsbt(wallet, password, step.psbt);
       const { txid } = await broadcast(wallet, signed);
-      setPassword("");
       onSent(txid);
     } catch (e) {
       setError(message(e));
@@ -510,55 +506,18 @@ function ReviewStep({
         }
       >
         {asking ? (
-          <div className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
-            <div className="flex flex-col items-center text-center">
-              <span className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-500/15 text-violet-300">
-                <Logo className="h-7 w-7" />
-              </span>
-              <h2 className="mt-4 text-xl font-semibold">Enter your password</h2>
-              <p className="mt-1 text-sm text-zinc-400">
-                Enter your wallet password to sign this transaction.
-              </p>
-            </div>
-            <label className="mt-5 flex h-12 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 focus-within:border-zinc-600">
-              <input
-                autoFocus
-                type={showPassword ? "text" : "password"}
-                autoComplete="current-password"
-                placeholder="Enter password"
-                aria-label="Wallet password"
-                className="flex-1 bg-transparent text-sm placeholder:text-zinc-500 focus:outline-none"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && password && !busy && signAndSend()}
-                disabled={busy}
-              />
-              <button
-                type="button"
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                onClick={() => setShowPassword((v) => !v)}
-                className="text-zinc-400 hover:text-zinc-100"
-              >
-                {showPassword ? <EyeIcon /> : <EyeOffIcon />}
-              </button>
-            </label>
-            {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
-            <div className="mt-3">
-              <PrimaryButton onClick={signAndSend} disabled={!password || busy}>
-                {busy ? "Signing…" : "Sign and send"}
-              </PrimaryButton>
-            </div>
-            <button
-              onClick={() => {
-                setAsking(false);
-                setError(undefined);
-              }}
-              disabled={busy}
-              className="mt-3 w-full text-center text-sm text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
-            >
-              Cancel
-            </button>
-          </div>
+          <PasswordCard
+            subtitle="Enter your wallet password to sign this transaction."
+            actionLabel="Sign and send"
+            busyLabel="Signing…"
+            busy={busy}
+            error={error}
+            onSubmit={signAndSend}
+            onCancel={() => {
+              setAsking(false);
+              setError(undefined);
+            }}
+          />
         ) : (
           <>
             <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-4">
