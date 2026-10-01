@@ -96,10 +96,15 @@ export function WalletView({
   const home = () => setView("home");
 
   if (view === "send") {
+    const b = data?.balance;
     return (
-      <Screen title="Send" onBack={home}>
-        <Send wallet={wallet} onSent={refresh} />
-      </Screen>
+      <Send
+        wallet={wallet}
+        // Spendable: everything but coinbase outputs that haven't matured yet.
+        available={b && b.total_sat - b.immature_sat}
+        onClose={home}
+        onSent={refresh}
+      />
     );
   }
   if (view === "receive") {

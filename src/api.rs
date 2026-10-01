@@ -57,6 +57,10 @@ pub struct PsbtRequest {
     /// `fast`, `normal` (default) or `slow`. Ignored when `fee_rate_sat_vb` is set.
     #[serde(default)]
     pub fee_priority: FeePriority,
+    /// Send everything spendable (minus the fee, no change). `amount_sat` is then ignored;
+    /// the response says what the amount came to.
+    #[serde(default)]
+    pub send_all: bool,
 }
 
 /// An unsigned PSBT plus the server's summary of it. Signers must not trust the summary;

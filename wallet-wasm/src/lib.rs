@@ -104,6 +104,32 @@ pub fn address_at(descriptor: &str, index: u32, network: &str) -> Result<String,
     Ok(address.to_string())
 }
 
+/// Checks a recipient address as the user types it: throws a readable reason unless it's a
+/// valid address for this wallet's `network`. Catches typos (the checksum) and addresses for
+/// another network before any request is made.
+#[wasm_bindgen(js_name = checkAddress)]
+pub fn check_address(address: &str, network: &str) -> Result<(), JsError> {
+    let network = parse_network(network)?;
+    let address = Address::from_str(address.trim())
+        .map_err(|_| JsError::new("That's not a valid bitcoin address"))?;
+    if address.is_valid_for_network(network) {
+        return Ok(());
+    }
+    // Name the network it is for, so the mistake is obvious.
+    let actual = [Network::Bitcoin, Network::Regtest, Network::Testnet]
+        .into_iter()
+        .find(|n| address.is_valid_for_network(*n))
+        .map(|n| match n {
+            Network::Bitcoin => "a mainnet",
+            Network::Regtest => "a regtest",
+            _ => "a testnet or signet",
+        })
+        .unwrap_or("another network's");
+    Err(JsError::new(&format!(
+        "That's {actual} address, but this wallet is on {network}"
+    )))
+}
+
 /// What the user must see before signing, worked out from the PSBT itself.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

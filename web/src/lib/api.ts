@@ -104,6 +104,8 @@ export type PsbtRequest = {
   address: string;
   amount_sat: number;
   fee_priority: FeePriority;
+  /** Send everything spendable minus the fee ("Max"); `amount_sat` is then ignored. */
+  send_all?: boolean;
 };
 
 /** The server's unsigned PSBT and its own summary. Don't trust the summary: check the PSBT

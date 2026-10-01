@@ -125,3 +125,9 @@ export async function recoverApiToken(
   const signature = (await loadWallet()).proveOwnership(wallet, password, challenge);
   return (await recoverToken(wallet.walletId, challenge, signature)).token;
 }
+
+/** Throws a readable reason unless `address` is a valid address for `network` (catches typos
+ * via the address checksum, and addresses for another network). */
+export async function checkAddress(address: string, network: string): Promise<void> {
+  (await loadWallet()).checkAddress(address, network);
+}

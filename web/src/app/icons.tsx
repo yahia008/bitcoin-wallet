@@ -107,3 +107,24 @@ export const PlusCircleIcon = (p: Props) => (
     <path d="M10 7v6M7 10h6" />
   </Icon>
 );
+
+export const ChevronRightIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <path d="M8 5l5 5-5 5" />
+  </Icon>
+);
+
+export const UserIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="10" cy="10" r="7" />
+    <circle cx="10" cy="8.5" r="2.5" />
+    <path d="M5.5 15.5a5 5 0 0 1 9 0" />
+  </Icon>
+);
+
+export const GearIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <circle cx="10" cy="10" r="2.5" />
+    <path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4M15.3 15.3l-1.4-1.4M6.1 6.1 4.7 4.7" />
+  </Icon>
+);

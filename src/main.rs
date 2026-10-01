@@ -398,7 +398,7 @@ fn send_local(
 
     let priority = options.fee.unwrap_or(FeePriority::Normal);
     let fee_rate = send::choose_fee_rate(&backend, options.fee_rate, priority)?;
-    let draft = send::build(&mut wallet, to, amount, fee_rate, &[])?;
+    let draft = send::build(&mut wallet, to, send::SendAmount::Exact(amount), fee_rate, &[])?;
     print_summary(to, amount, draft.fee, draft.change, &draft.psbt);
     // Returning here or below without persisting also discards the change address the
     // builder revealed.
@@ -436,6 +436,7 @@ fn send_via_server(
         amount_sat: amount.to_sat(),
         fee_rate_sat_vb: options.fee_rate,
         fee_priority: options.fee.unwrap_or(FeePriority::Normal),
+        send_all: false,
     };
     let response = api.build_psbt(&id, &request).map_err(explain_api_error)?;
     let mut psbt = Psbt::from_str(&response.psbt).context("server returned an invalid PSBT")?;

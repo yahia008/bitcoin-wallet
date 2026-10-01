@@ -102,21 +102,36 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// How much to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendAmount {
+    Exact(Amount),
+    /// Everything spendable, minus the fee: no change output. The exact amount depends on
+    /// which coins there are and the fee, so only the builder can work it out.
+    All,
+}
+
 /// Selects coins and builds an unsigned PSBT paying `amount` to `to`, with change back to us.
 /// Coins in `unspendable` are never selected (the server passes coins reserved by PSBTs it
 /// has handed out but not yet seen broadcast).
 pub fn build(
     wallet: &mut Wallet,
     to: &Address,
-    amount: Amount,
+    amount: SendAmount,
     fee_rate: FeeRate,
     unspendable: &[OutPoint],
 ) -> Result<Draft, BuildError> {
     let mut builder = wallet.build_tx();
-    builder
-        .add_recipient(to.script_pubkey(), amount)
-        .fee_rate(fee_rate)
-        .unspendable(unspendable.to_vec());
+    match amount {
+        SendAmount::Exact(amount) => {
+            builder.add_recipient(to.script_pubkey(), amount);
+        }
+        // drain_wallet respects `unspendable`, so reserved coins stay out of it too.
+        SendAmount::All => {
+            builder.drain_wallet().drain_to(to.script_pubkey());
+        }
+    }
+    builder.fee_rate(fee_rate).unspendable(unspendable.to_vec());
     let psbt = builder.finish().map_err(build_error)?;
     draft(wallet, psbt)
 }
@@ -282,7 +297,13 @@ mod tests {
 
         let fee_rate = FeeRate::from_sat_per_vb(2).unwrap();
         let draft =
-            build(&mut wallet, &addr(RECIPIENT), Amount::from_sat(30_000_000), fee_rate, &[])
+            build(
+                &mut wallet,
+                &addr(RECIPIENT),
+                SendAmount::Exact(Amount::from_sat(30_000_000)),
+                fee_rate,
+                &[],
+            )
                 .unwrap();
         (wallet, draft.psbt)
     }
@@ -324,6 +345,20 @@ mod tests {
             .push(TxOut { value: Amount::from_sat(1000), script_pubkey: addr(ATTACKER).script_pubkey() });
         psbt.outputs.push(Default::default());
         assert!(check(&wallet, &psbt).is_err());
+    }
+
+    #[test]
+    fn send_all_drains_to_the_recipient_without_change() {
+        let (mut wallet, _) = setup();
+        let rate = FeeRate::from_sat_per_vb(2).unwrap();
+        let draft = build(&mut wallet, &addr(RECIPIENT), SendAmount::All, rate, &[]).unwrap();
+        let tx = &draft.psbt.unsigned_tx;
+        assert_eq!(tx.output.len(), 1, "no change output");
+        assert_eq!(draft.change, Amount::ZERO);
+        // Everything we had (1 BTC) goes out, as payment plus fee.
+        assert_eq!(tx.output[0].value + draft.fee, Amount::ONE_BTC);
+        // And it reviews like any payment of that amount.
+        review(&wallet, &draft.psbt, &addr(RECIPIENT), tx.output[0].value).unwrap();
     }
 
     /// Regression: signing must produce a PSBT the watch-only side can finalize.

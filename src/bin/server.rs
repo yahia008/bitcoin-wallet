@@ -589,7 +589,12 @@ async fn build_psbt(
         .map_err(|_| ApiError::bad_request("invalid address"))?
         .require_network(state.network)
         .map_err(|_| ApiError::bad_request("address is for a different network"))?;
-    let amount = Amount::from_sat(req.amount_sat);
+    let amount = if req.send_all {
+        send::SendAmount::All
+    } else {
+        send::SendAmount::Exact(Amount::from_sat(req.amount_sat))
+    };
+    let recipient = to.script_pubkey();
 
     let (draft, fee_rate) = with_wallet(state, id, token, move |w, backend| {
         let fee_rate = send::choose_fee_rate(backend, req.fee_rate_sat_vb, req.fee_priority)
@@ -603,9 +608,18 @@ async fn build_psbt(
     })
     .await?;
 
+    // For send-all, the amount is whatever the recipient's output came to.
+    let paid: Amount = draft
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .filter(|o| o.script_pubkey == recipient)
+        .map(|o| o.value)
+        .sum();
     Ok(Json(PsbtResponse {
         psbt: draft.psbt.to_string(),
-        amount_sat: amount.to_sat(),
+        amount_sat: paid.to_sat(),
         fee_sat: draft.fee.to_sat(),
         change_sat: draft.change.to_sat(),
         fee_rate_sat_vb: fee_rate.to_sat_per_vb_ceil(),
