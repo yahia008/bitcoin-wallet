@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 
 import { API_URL, health, type Health } from "@/lib/api";
 
+import { FirstAddress } from "./first-address";
+
 type Status =
   | { kind: "checking" }
   | { kind: "ok"; health: Health }
@@ -43,6 +45,8 @@ export default function Home() {
           </p>
         )}
       </section>
+
+      {status.kind === "ok" && <FirstAddress network={status.health.network} />}
     </main>
   );
 }

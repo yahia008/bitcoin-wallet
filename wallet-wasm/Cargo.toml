@@ -1,0 +1,13 @@
+[package]
+name = "wallet-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "JavaScript bindings for wallet-core, for the browser wallet in web/"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bdk_wallet = { version = "3.2.0", features = ["keys-bip39"] }
+wallet-core = { path = "../wallet-core" }
+wasm-bindgen = "0.2"

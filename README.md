@@ -116,12 +116,14 @@ Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-
 
 `web/` is a Next.js + TypeScript + Tailwind app that will do what the CLI does, in the browser: keys stay in the browser, which talks to the same API server. It builds to static files (`output: "export"`), so there's no Next.js server that could ever see a secret.
 
+The browser runs the same Rust code as the CLI: `wallet-core` (keys, PSBT review, signing) compiled to WebAssembly through the thin `wallet-wasm` bindings crate. Building it needs `wasm-pack` (`cargo install wasm-pack`) and `clang` (`sudo apt install clang`, for secp256k1's C code); `npm run dev` and `npm run build` build it first.
+
 ```bash
 cargo run --bin server -- --network testnet4 --data-dir server-testnet4   # API on :3000
 cd web && npm install && npm run dev                                       # wallet on :3001
 ```
 
-Open http://localhost:3001. It shows whether it can reach the API and on which network. Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
+Open http://localhost:3001. It shows whether it can reach the API and on which network, and can derive a phrase's first receive address in the browser (a first test of the WASM module). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
 ## Security model
 
@@ -155,7 +157,6 @@ cargo test -- --ignored           # end-to-end: real server + regtest, full non-
 
 ```
 src/lib.rs          shared: parse_network(), load(), wallet_id(), confirmations()
-src/keys.rs         mnemonic → account key → BIP84 descriptors
 src/secret.rs       encrypted account key storage
 src/chain.rs        chain backends (Core RPC, Esplora) and sync
 src/history.rs      transaction and address views
@@ -165,6 +166,8 @@ src/client.rs       HTTP client used by the CLI
 src/main.rs         CLI
 src/bin/server.rs   API server
 tests/regtest.rs    end-to-end test
+wallet-core/        keys, PSBT review and signing with no I/O; shared by the CLI and the browser
+wallet-wasm/        JavaScript bindings for wallet-core
 web/                web wallet (Next.js, static export)
 ```
 

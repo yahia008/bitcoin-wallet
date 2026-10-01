@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "bitcoin-wallet"
 
 [workspace]
-members = [".", "wallet-core"]
+members = [".", "wallet-core", "wallet-wasm"]
 
 [dependencies]
 anyhow = "1.0.104"
