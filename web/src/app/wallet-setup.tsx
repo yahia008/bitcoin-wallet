@@ -244,15 +244,12 @@ function PhraseStep({
   onReady: (wallet: StoredWallet) => void;
 }) {
   const creating = generatedWords !== undefined;
-  const [typedWords, setTypedWords] = useState("");
   // When creating: explain the phrase, show it, then have the user confirm it.
   const [stage, setStage] = useState<"intro" | "show" | "confirm">("intro");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  const words = generatedWords ?? typedWords;
-
-  async function submit() {
+  async function submit(words: string) {
     setBusy(true);
     setError(undefined);
     try {
@@ -302,7 +299,7 @@ function PhraseStep({
         words={generatedWords.split(" ")}
         busy={busy}
         error={error}
-        onConfirmed={submit}
+        onConfirmed={() => submit(generatedWords)}
         onShowAgain={() => {
           setError(undefined);
           setStage("show");
@@ -335,25 +332,124 @@ function PhraseStep({
       </button>
     </SetupCard>
   ) : (
-    <SetupCard title="Import Your Wallet" subtitle="Enter your 12-word recovery phrase">
-      <textarea
-        className="w-full rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 font-mono text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
-        rows={4}
-        placeholder="word1 word2 word3 …"
-        value={typedWords}
-        onChange={(e) => setTypedWords(e.target.value)}
-        autoComplete="off"
-        spellCheck={false}
-      />
+    <ImportPhrase busy={busy} error={error} onImport={submit} onBack={onBack} />
+  );
+}
+
+/** "I already have a wallet": one box per word (12 or 24), hidden unless shown. Pasting the
+ * whole phrase into a box fills them all. */
+function ImportPhrase({
+  busy,
+  error,
+  onImport,
+  onBack,
+}: {
+  busy: boolean;
+  error?: string;
+  onImport: (words: string) => void;
+  onBack: () => void;
+}) {
+  const [count, setCount] = useState<12 | 24>(12);
+  const [words, setWords] = useState<string[]>(() => Array(24).fill(""));
+  const [visible, setVisible] = useState(false);
+
+  const shown = words.slice(0, count);
+  const complete = shown.every((w) => w !== "");
+
+  function setWord(index: number, value: string) {
+    setWords((ws) => ws.map((w, i) => (i === index ? value.trim().toLowerCase() : w)));
+  }
+
+  function paste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const pasted = e.clipboardData.getData("text").trim().toLowerCase().split(/\s+/);
+    if (pasted.length < 2) return; // a single word: let the box take it normally
+    e.preventDefault();
+    if (pasted.length > 12) setCount(24);
+    setWords(Array.from({ length: 24 }, (_, i) => pasted[i] ?? ""));
+  }
+
+  return (
+    <SetupCard
+      title="Import wallet from recovery phrase"
+      subtitle="Enter your mnemonic phrase to restore your wallet. You can also paste the phrase in the first box."
+    >
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-xl border border-zinc-800 bg-zinc-950/60 p-5">
+        {shown.map((word, i) => (
+          <input
+            key={i}
+            type={visible ? "text" : "password"}
+            aria-label={`Word ${i + 1}`}
+            placeholder={String(i + 1).padStart(2, "0")}
+            className="h-9 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 font-mono text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+            value={word}
+            onChange={(e) => setWord(i, e.target.value)}
+            onPaste={paste}
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+        ))}
+      </div>
+      <div className="mt-3 flex items-center justify-between">
+        <div className="flex items-center gap-3 text-sm">
+          <span className={count === 12 ? "text-zinc-100" : "text-zinc-500"}>12 word</span>
+          <button
+            role="switch"
+            aria-checked={count === 24}
+            aria-label="Use a 24-word phrase"
+            onClick={() => setCount((c) => (c === 12 ? 24 : 12))}
+            className={`relative h-6 w-11 rounded-full transition-colors ${
+              count === 24 ? "bg-violet-500" : "bg-zinc-800"
+            }`}
+          >
+            <span
+              className={`absolute top-1 left-1 h-4 w-4 rounded-full bg-zinc-950 transition-transform ${
+                count === 24 ? "translate-x-5" : ""
+              }`}
+            />
+          </button>
+          <span className={count === 24 ? "text-zinc-100" : "text-zinc-500"}>24 word</span>
+        </div>
+        <button
+          className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-xs font-semibold"
+          onClick={() => setVisible((v) => !v)}
+        >
+          {visible ? "Hide" : "Show"} <EyeIcon />
+        </button>
+      </div>
       {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
-      <StepButtons
-        onBack={onBack}
-        onNext={submit}
-        nextLabel={busy ? "Importing…" : "Import wallet"}
-        nextDisabled={!typedWords.trim() || busy}
-        backDisabled={busy}
-      />
+      <button
+        className="mt-8 h-11 w-full rounded-xl text-sm font-semibold transition-colors enabled:bg-zinc-100 enabled:text-zinc-900 enabled:hover:bg-white disabled:border disabled:border-zinc-800 disabled:text-zinc-500"
+        onClick={() => onImport(shown.join(" "))}
+        disabled={!complete || busy}
+      >
+        {busy ? "Importing…" : "Import"}
+      </button>
+      <button
+        className="mt-3 w-full text-center text-sm text-zinc-400 hover:text-zinc-100 disabled:opacity-40"
+        onClick={onBack}
+        disabled={busy}
+      >
+        Back
+      </button>
     </SetupCard>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8Z" />
+      <circle cx="8" cy="8" r="2" />
+    </svg>
   );
 }
 

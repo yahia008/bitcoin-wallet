@@ -264,10 +264,7 @@ fn public_wallet(account_key: &str, network: Network) -> Result<Wallet, JsError>
 }
 
 fn parse_mnemonic(words: &str) -> Result<Mnemonic, JsError> {
-    // Same normalising as the CLI's restore: any whitespace, any case.
-    let words = words.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-    Mnemonic::parse_in(Language::English, words)
-        .map_err(|e| JsError::new(&format!("invalid recovery phrase: {e}")))
+    keys::parse_mnemonic(words).map_err(js)
 }
 
 /// Mainnet is refused, as in the CLI: keys use the testnet coin type.

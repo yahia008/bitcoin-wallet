@@ -12,11 +12,33 @@ use anyhow::bail;
 use bdk_wallet::bitcoin::bip32::{DerivationPath, Fingerprint, Xpriv};
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::descriptor::ExtendedDescriptor;
-use bdk_wallet::keys::bip39::Mnemonic;
+use anyhow::anyhow;
+use bdk_wallet::keys::bip39::{self, Language, Mnemonic};
 use bdk_wallet::miniscript::descriptor::{DescriptorSecretKey, DescriptorXKey, KeyMap, Wildcard};
 
 /// BIP84 account path: purpose 84' (native SegWit) / coin type 1' (test networks) / account 0'.
 const ACCOUNT_PATH: &str = "m/84h/1h/0h";
+
+/// Parses a recovery phrase as typed: any spacing, any case. Errors are worded for people,
+/// counting words from 1 (the bip39 crate counts from 0).
+pub fn parse_mnemonic(phrase: &str) -> anyhow::Result<Mnemonic> {
+    let words: Vec<String> = phrase.split_whitespace().map(str::to_lowercase).collect();
+    Mnemonic::parse_in(Language::English, words.join(" ")).map_err(|e| match e {
+        bip39::Error::UnknownWord(i) => anyhow!(
+            "invalid recovery phrase: word {} (\"{}\") isn't in the recovery phrase word list",
+            i + 1,
+            words[i]
+        ),
+        bip39::Error::BadWordCount(n) => {
+            anyhow!("invalid recovery phrase: it has {n} words; it should have 12 or 24")
+        }
+        bip39::Error::InvalidChecksum => anyhow!(
+            "invalid recovery phrase: the words are all valid, but not in this combination; \
+             check for a swapped or mistyped word"
+        ),
+        e => anyhow!("invalid recovery phrase: {e}"),
+    })
+}
 
 /// Derives the account key from the mnemonic, as `[fingerprint/84'/1'/0']tprv…`. The origin
 /// in brackets (master key fingerprint + path) is what lets a signer match a PSBT input's
@@ -88,6 +110,19 @@ mod tests {
              abandon abandon abandon abandon abandon about",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn parse_mnemonic_is_forgiving_and_explains_errors() {
+        let messy = "  ABANDON abandon\tabandon abandon abandon abandon abandon abandon abandon \
+                     abandon abandon   about ";
+        assert_eq!(parse_mnemonic(messy).unwrap(), mnemonic());
+        let unknown = parse_mnemonic(&mnemonic().to_string().replacen("about", "aboot", 1));
+        assert!(unknown.unwrap_err().to_string().contains("word 12 (\"aboot\")"));
+        let short = parse_mnemonic("abandon abandon abandon");
+        assert!(short.unwrap_err().to_string().contains("3 words"));
+        let swapped = parse_mnemonic(&mnemonic().to_string().replacen("about", "abandon", 1));
+        assert!(swapped.unwrap_err().to_string().contains("not in this combination"));
     }
 
     #[test]

@@ -191,10 +191,8 @@ fn restore(cli: &Cli, birthday: Option<u32>) -> anyhow::Result<()> {
 
     // Read with echo off so the words never appear on screen or in shell history.
     let input = rpassword::prompt_password("Recovery phrase (hidden): ")?;
-    let words = input.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     // Also validates that every word is in the BIP39 list and the checksum matches.
-    let mnemonic = Mnemonic::parse_in(Language::English, words)
-        .map_err(|e| anyhow!("invalid recovery phrase: {e}"))?;
+    let mnemonic = keys::parse_mnemonic(&input)?;
 
     let password = new_password()?;
     init_wallet(db, cli.chain.network, &mnemonic, &password, birthday.unwrap_or(0))?;
