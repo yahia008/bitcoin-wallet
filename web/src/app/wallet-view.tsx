@@ -304,13 +304,13 @@ function NetworkBanner({ network }: { network: string }) {
     }
   }
   return (
-    <div className="mt-4 flex items-start gap-3 rounded-2xl bg-violet-950/60 p-4">
-      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-500/20 text-violet-300">
+    <div className="mt-4 flex items-start gap-3 rounded-2xl border border-white/10 bg-gradient-to-br from-zinc-800/80 to-zinc-950 p-4">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-white/5 text-white">
         <Logo className="h-6 w-6" />
       </span>
       <div className="flex-1">
-        <p className="font-semibold">You&apos;re on {network}</p>
-        <p className="text-sm text-violet-200/70">Coins here are for testing and have no value.</p>
+        <p className="font-semibold text-white">You&apos;re on {network}</p>
+        <p className="text-sm text-zinc-400">Coins here are for testing and have no value.</p>
       </div>
       <button aria-label="Dismiss" onClick={dismiss} className="text-zinc-400 hover:text-zinc-100">
         <CloseIcon />
@@ -328,11 +328,13 @@ function Tabs({ tabs }: { tabs: Record<string, React.ReactNode> }) {
         {names.map((name) => (
           <button
             key={name}
+            role="tab"
+            aria-selected={active === name}
             onClick={() => setActive(name)}
             className={`-mb-px border-b-2 pb-3 text-sm font-semibold transition-colors ${
               active === name
-                ? "border-violet-400 text-violet-300"
-                : "border-transparent text-zinc-400 hover:text-zinc-200"
+                ? "border-white text-white"
+                : "border-transparent text-zinc-500 hover:text-zinc-200"
             }`}
           >
             {name}
