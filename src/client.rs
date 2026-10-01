@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::api::{
-    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ErrorBody, PsbtRequest,
-    PsbtResponse, RegisterRequest, RegisterResponse,
+    BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ChallengeResponse, ErrorBody,
+    PsbtRequest, PsbtResponse, RegisterRequest, RegisterResponse, TokenRequest, TokenResponse,
 };
 
 /// The server answered with an error status. Callers can downcast to this to react to
@@ -71,26 +71,60 @@ impl ApiClient {
         self.post(&format!("/wallets/{id}/broadcast"), request)
     }
 
+    /// Whether the server accepts our token for wallet `id` (any wallet read would do).
+    pub fn token_works(&self, id: &str) -> anyhow::Result<bool> {
+        match self.get::<serde_json::Value>(&format!("/wallets/{id}/balance")) {
+            Ok(_) => Ok(true),
+            Err(e) if e.downcast_ref::<ApiError>().is_some_and(|e| e.status == 401) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Starts token recovery: a one-time challenge to sign with the wallet's key.
+    pub fn challenge(&self, id: &str) -> anyhow::Result<ChallengeResponse> {
+        self.post(&format!("/wallets/{id}/challenge"), &serde_json::json!({}))
+    }
+
+    /// Trades a signed challenge for a new token; the previous one stops working.
+    pub fn recover_token(&self, id: &str, request: &TokenRequest) -> anyhow::Result<TokenResponse> {
+        self.post(&format!("/wallets/{id}/token"), request)
+    }
+
+    fn get<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        let mut request = self.agent.get(format!("{}{path}", self.base_url));
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = request
+            .call()
+            .with_context(|| format!("cannot reach the wallet API at {}", self.base_url))?;
+        read(response)
+    }
+
     fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> anyhow::Result<T> {
         let mut request = self.agent.post(format!("{}{path}", self.base_url));
         if let Some(token) = &self.token {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-        let mut response = request
+        let response = request
             .send_json(body)
             .with_context(|| format!("cannot reach the wallet API at {}", self.base_url))?;
-
-        let status = response.status();
-        if status.is_success() {
-            return response.body_mut().read_json().context("unexpected API response");
-        }
-        let message = response
-            .body_mut()
-            .read_json::<ErrorBody>()
-            .map(|e| e.error)
-            .unwrap_or_else(|_| status.to_string());
-        Err(ApiError { status: status.as_u16(), message }.into())
+        read(response)
     }
+}
+
+/// The parsed body of a successful response, or an `ApiError` with the server's message.
+fn read<T: DeserializeOwned>(mut response: ureq::http::Response<ureq::Body>) -> anyhow::Result<T> {
+    let status = response.status();
+    if status.is_success() {
+        return response.body_mut().read_json().context("unexpected API response");
+    }
+    let message = response
+        .body_mut()
+        .read_json::<ErrorBody>()
+        .map(|e| e.error)
+        .unwrap_or_else(|_| status.to_string());
+    Err(ApiError { status: status.as_u16(), message }.into())
 }
 
 /// Saves the API token a server issued for this wallet, in the wallet's own database. It's

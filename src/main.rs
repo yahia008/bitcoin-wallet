@@ -11,13 +11,16 @@ use bdk_wallet::keys::{GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Segwitv0;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{AddressInfo, KeychainKind, PersistedWallet, Wallet};
-use bitcoin_wallet::api::{BroadcastRequest, BumpRequest, PsbtRequest, RegisterRequest};
+use bitcoin_wallet::api::{
+    BroadcastRequest, BumpRequest, PsbtRequest, RegisterRequest, TokenRequest,
+};
 use bitcoin_wallet::client::{self, ApiClient, ApiError};
 use bitcoin_wallet::chain::{self, ChainArgs};
 use bitcoin_wallet::send::FeePriority;
 use bitcoin_wallet::{history, keys, load, secret, send, wallet_id};
 use clap::{Parser, Subcommand};
 use wallet_core::crypto::MIN_PASSWORD_LEN;
+use wallet_core::ownership;
 
 
 #[derive(Parser)]
@@ -216,32 +219,53 @@ fn export(cli: &Cli) -> anyhow::Result<()> {
 
 fn register(cli: &Cli, server: &str) -> anyhow::Result<()> {
     let (conn, wallet) = load(&cli.db, cli.chain.network)?;
+    let external = wallet.public_descriptor(KeychainKind::External).to_string();
+    let internal = wallet.public_descriptor(KeychainKind::Internal).to_string();
+    let id = wallet_id(&external, &internal);
     // Only public descriptors leave this machine.
-    let request = RegisterRequest {
-        external: wallet.public_descriptor(KeychainKind::External).to_string(),
-        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
-        birthday: chain::birthday(&conn)?,
-    };
-    let response = match ApiClient::new(server).register(&request) {
-        Ok(response) => response,
+    let request = RegisterRequest { external, internal, birthday: chain::birthday(&conn)? };
+    let api = ApiClient::new(server);
+    let token = match api.register(&request) {
+        Ok(response) => {
+            println!("Registered with {server} as wallet {}", response.id);
+            response.token
+        }
         Err(e) if status_of(&e) == Some(409) => {
-            if client::load_token(&conn, server)?.is_some() {
+            if let Some(saved) = client::load_token(&conn, server)?
+                && ApiClient::new(server).with_token(saved).token_works(&id)?
+            {
                 println!("Already registered with {server}.");
                 return Ok(());
             }
-            // The server only hands out a token once, so we can't get it again.
-            return Err(e.context(
-                "already registered with this server, but this wallet has no token for it \
-                 (registered from another copy of the wallet?)",
-            ));
+            recover_token(&conn, &wallet, &api, &id, server)?
         }
         Err(e) => return Err(e),
     };
-    client::save_token(&conn, server, &response.token)?;
-    println!("Registered with {server} as wallet {}", response.id);
+    client::save_token(&conn, server, &token)?;
     println!("API token (saved in {}; only needed for calling the API directly):", cli.db.display());
-    println!("  {}", response.token);
+    println!("  {token}");
     Ok(())
+}
+
+/// The server knows this wallet, but this copy has no working token for it (restored into a
+/// new file, registered from the web wallet, or its token was revoked). The server issues a
+/// new one to whoever signs its challenge with the wallet's key; the key stays here.
+fn recover_token(
+    conn: &Connection,
+    wallet: &Wallet,
+    api: &ApiClient,
+    id: &str,
+    server: &str,
+) -> anyhow::Result<String> {
+    println!("{server} already knows this wallet, but this copy has no working API token for it.");
+    println!("Proving you own the wallet gets a new token. Other copies of this wallet using that");
+    println!("server (e.g. the web wallet) are signed out and will have to do the same.");
+    let account_key = unlock(conn, wallet)?;
+    let challenge = api.challenge(id)?.challenge;
+    let signature = ownership::sign(&account_key, id, &challenge)?;
+    let token = api.recover_token(id, &TokenRequest { challenge, signature })?.token;
+    println!("Got a new API token; the previous one no longer works.");
+    Ok(token)
 }
 
 fn status_of(e: &anyhow::Error) -> Option<u16> {
@@ -459,7 +483,10 @@ fn api_session(
 fn explain_api_error(e: anyhow::Error) -> anyhow::Error {
     match status_of(&e) {
         Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
-        Some(401) => e.context("the server rejected this wallet's API token"),
+        Some(401) => e.context(
+            "the server rejected this wallet's API token (signed out by another copy of the \
+             wallet?); run `register --server URL` again to get a new one",
+        ),
         _ => e,
     }
 }
