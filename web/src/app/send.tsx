@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { broadcast, buildPsbt, type FeePriority } from "@/lib/api";
 import { explorerTxUrl, formatBtc, formatBtcShort, parseBtc } from "@/lib/format";
@@ -8,12 +8,18 @@ import type { StoredWallet } from "@/lib/store";
 import { checkAddress, reviewSend, signPsbt, type SendReview } from "@/lib/wallet";
 
 import {
+  ArrowDownIcon,
   ArrowUpIcon,
   BackIcon,
   CheckIcon,
   ChevronRightIcon,
   CloseIcon,
+  DoubleChevronDownIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FeeIcon,
   GearIcon,
+  ListIcon,
   UserIcon,
 } from "./icons";
 import { Logo } from "./logo";
@@ -110,7 +116,7 @@ export function Send({
 
   const url = explorerTxUrl(wallet.network, step.txid);
   return (
-    <div className="flex min-h-[560px] flex-col">
+    <div className="flex min-h-[560px] flex-1 flex-col">
       <Header title="Send" onClose={onClose} />
       <div className="flex flex-1 flex-col items-center justify-center text-center">
         <span className="flex h-16 w-16 items-center justify-center rounded-full bg-lime-500/15 text-lime-300">
@@ -215,7 +221,7 @@ function AddressStep({
   const valid = result !== undefined && result.error === undefined;
 
   return (
-    <div className="flex min-h-[560px] flex-col">
+    <div className="flex min-h-[560px] flex-1 flex-col">
       <Header title="Send" onClose={onClose} />
       <label
         className={`mt-6 flex h-12 items-center gap-3 rounded-xl border bg-zinc-950/60 px-4 ${
@@ -328,7 +334,7 @@ function AmountStep({
 
   const speed = PRIORITIES.find((p) => p.value === priority)!;
   return (
-    <div className="flex min-h-[560px] flex-col">
+    <div className="flex min-h-[560px] flex-1 flex-col">
       <Header title="Send" onClose={onClose} />
 
       <button
@@ -441,7 +447,8 @@ function AmountStep({
   );
 }
 
-/** Step 3: what the PSBT really does, verified in this browser, then password and sign. */
+/** Step 3: a bottom sheet over the dimmed send screen: what the PSBT really does (already
+ * verified in this browser), then the password, then sign. */
 function ReviewStep({
   wallet,
   address,
@@ -455,12 +462,21 @@ function ReviewStep({
   onBack: () => void;
   onSent: (txid: string) => void;
 }) {
+  const [asking, setAsking] = useState(false); // false: summary; true: password
+  const [details, setDetails] = useState(false);
+  const detailsRef = useRef<HTMLDListElement>(null);
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [allowHighFee, setAllowHighFee] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const { review } = step;
   const blocked = !!review.feeWarning && !allowHighFee;
+
+  // Opening the details scrolls them into view, so it's clear more appeared below.
+  useEffect(() => {
+    if (details) detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [details]);
 
   async function signAndSend() {
     setBusy(true);
@@ -477,70 +493,180 @@ function ReviewStep({
     }
   }
 
-  const row = "flex justify-between gap-4 py-2";
+  const row = "flex items-center justify-between gap-4 py-3";
   return (
-    <div className="flex min-h-[560px] flex-col">
-      <Header title="Review send" onBack={onBack} />
-      <div className="mt-6 flex flex-col items-center text-center">
-        <p className="text-3xl font-semibold tabular-nums">
-          {formatBtcShort(step.amountSat)} <span className="text-lg text-zinc-400">BTC</span>
-        </p>
-        <p className="mt-1 font-mono text-sm text-zinc-400">to {short(address)}</p>
+    <div className="relative flex min-h-[560px] flex-1 flex-col">
+      {/* The send screen behind the sheet, dimmed. */}
+      <div className="opacity-40">
+        <Header title="Send" onClose={onBack} />
       </div>
-      <p className="mt-5 flex items-center gap-2 rounded-xl bg-lime-500/10 px-3 py-2 text-sm text-lime-300">
-        <CheckIcon /> Verified in this browser: pays exactly this, the rest comes back to you.
-      </p>
-      <dl className="mt-3 divide-y divide-zinc-800 rounded-2xl bg-zinc-800/50 px-4 text-sm tabular-nums">
-        <div className={row}>
-          <dt className="text-zinc-400">To</dt>
-          <dd className="break-all text-right font-mono text-xs">{address}</dd>
-        </div>
-        <div className={row}>
-          <dt className="text-zinc-400">Amount</dt>
-          <dd>{formatBtc(step.amountSat)} BTC</dd>
-        </div>
-        <div className={row}>
-          <dt className="text-zinc-400">Network fee</dt>
-          <dd>
-            {formatBtc(review.feeSat)} BTC{" "}
-            <span className="text-zinc-500">(~{review.feeRate.toFixed(1)} sat/vB)</span>
-          </dd>
-        </div>
-        <div className={row}>
-          <dt className="text-zinc-400">Change back to you</dt>
-          <dd>{formatBtc(review.changeSat)} BTC</dd>
-        </div>
-        <div className={row}>
-          <dt className="text-zinc-400">Total</dt>
-          <dd className="font-semibold">{formatBtc(step.amountSat + review.feeSat)} BTC</dd>
-        </div>
-      </dl>
-      {review.feeWarning && (
-        <label className="mt-3 flex items-start gap-2 text-sm text-red-400">
-          <input
-            type="checkbox"
-            className="mt-1 accent-violet-500"
-            checked={allowHighFee}
-            onChange={(e) => setAllowHighFee(e.target.checked)}
-          />
-          <span>The fee looks like a mistake: {review.feeWarning}. Tick to send anyway.</span>
-        </label>
-      )}
-      <div className="flex-1" />
-      <input
-        type="password"
-        autoComplete="current-password"
-        placeholder="Wallet password"
-        className="mt-4 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 text-sm placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && password && !blocked && !busy && signAndSend()}
-      />
-      {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
-      <div className="mt-3">
-        <PrimaryButton onClick={signAndSend} disabled={!password || blocked || busy}>
-          {busy ? "Signing…" : "Sign and send"}
-        </PrimaryButton>
+      <div className="absolute inset-x-0 bottom-0 top-12 -mx-4 -mb-6 flex flex-col rounded-t-3xl border-t border-zinc-800 bg-zinc-900 px-5 pt-6 pb-6 shadow-2xl sm:-mx-6 sm:rounded-b-3xl">
+        {asking ? (
+          <>
+            <div className="flex flex-col items-center text-center">
+              <span className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-500/15 text-violet-300">
+                <Logo className="h-7 w-7" />
+              </span>
+              <h2 className="mt-4 text-xl font-semibold">Enter your password</h2>
+              <p className="mt-1 text-sm text-zinc-400">
+                Your password unlocks your key in this browser to sign the transaction.
+              </p>
+            </div>
+            <label className="mt-6 flex h-12 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 focus-within:border-zinc-600">
+              <input
+                autoFocus
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                placeholder="Enter password"
+                aria-label="Wallet password"
+                className="flex-1 bg-transparent text-sm placeholder:text-zinc-500 focus:outline-none"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && password && !busy && signAndSend()}
+                disabled={busy}
+              />
+              <button
+                type="button"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                onClick={() => setShowPassword((v) => !v)}
+                className="text-zinc-400 hover:text-zinc-100"
+              >
+                {showPassword ? <EyeIcon /> : <EyeOffIcon />}
+              </button>
+            </label>
+            {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+            <div className="flex-1" />
+            <PrimaryButton onClick={signAndSend} disabled={!password || busy}>
+              {busy ? "Signing…" : "Sign and send"}
+            </PrimaryButton>
+            <button
+              onClick={() => {
+                setAsking(false);
+                setError(undefined);
+              }}
+              disabled={busy}
+              className="mt-3 h-12 w-full rounded-full border border-zinc-800 text-sm font-semibold disabled:opacity-40"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1 pb-4">
+              <p className="text-lg">You are sending</p>
+              <div className="mt-4 flex items-center gap-3">
+                <span className="flex h-11 w-11 items-center justify-center rounded-full bg-violet-500/15 text-violet-300">
+                  <Logo className="h-6 w-6" />
+                </span>
+                <span>
+                  <span className="block text-lg font-semibold tabular-nums">
+                    {formatBtcShort(step.amountSat)} BTC
+                  </span>
+                  <span className="block text-sm text-zinc-400 tabular-nums">
+                    ≈ {step.amountSat.toLocaleString()} sats
+                  </span>
+                </span>
+              </div>
+              <span className="my-2 ml-3 text-zinc-500">
+                <DoubleChevronDownIcon />
+              </span>
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 items-center justify-center rounded-full border border-zinc-700 text-lime-300">
+                  <ArrowUpIcon />
+                </span>
+                <span className="font-mono text-lg">{short(address)}</span>
+              </div>
+
+              <dl className="mt-6 divide-y divide-zinc-800 rounded-2xl bg-zinc-800/50 px-4 text-sm tabular-nums">
+                <div className={row}>
+                  <dt className="flex items-center gap-2 text-zinc-400">
+                    <FeeIcon /> Network fee
+                  </dt>
+                  <dd className="text-right">
+                    <span className="font-semibold">{formatBtcShort(review.feeSat)} BTC</span>
+                    <span className="block text-xs text-zinc-500">
+                      ~{review.feeRate.toFixed(1)} sat/vB
+                    </span>
+                  </dd>
+                </div>
+                <div className={row}>
+                  <dt className="flex items-center gap-2 text-zinc-400">
+                    <ArrowDownIcon className="h-4 w-4" /> Change back to you
+                  </dt>
+                  <dd className="font-semibold">{formatBtcShort(review.changeSat)} BTC</dd>
+                </div>
+              </dl>
+
+              <button
+                onClick={() => setDetails((d) => !d)}
+                aria-expanded={details}
+                className="mt-2 flex w-full items-center gap-2 rounded-2xl bg-zinc-800/50 px-4 py-3 text-left text-sm font-semibold text-violet-300 hover:bg-zinc-800"
+              >
+                <ListIcon /> Transaction details
+              </button>
+              {details && (
+                <dl
+                  ref={detailsRef}
+                  className="mt-2 space-y-2 rounded-2xl bg-zinc-800/30 px-4 py-3 text-xs tabular-nums"
+                >
+                  <p className="flex items-center gap-2 text-lime-300">
+                    <CheckIcon className="h-3.5 w-3.5" /> Verified in this browser: pays exactly
+                    this, the rest comes back to you.
+                  </p>
+                  <div>
+                    <dt className="text-zinc-500">To</dt>
+                    <dd className="break-all font-mono">{address}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-zinc-500">Amount</dt>
+                    <dd>{formatBtc(step.amountSat)} BTC</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-zinc-500">Network fee</dt>
+                    <dd>{formatBtc(review.feeSat)} BTC</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-zinc-500">Change</dt>
+                    <dd>{formatBtc(review.changeSat)} BTC</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-zinc-500">Total out</dt>
+                    <dd className="font-semibold">
+                      {formatBtc(step.amountSat + review.feeSat)} BTC
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-zinc-500">Inputs</dt>
+                    <dd>{review.inputs}</dd>
+                  </div>
+                </dl>
+              )}
+
+              {review.feeWarning && (
+                <label className="mt-3 flex items-start gap-2 text-sm text-red-400">
+                  <input
+                    type="checkbox"
+                    className="mt-1 accent-violet-500"
+                    checked={allowHighFee}
+                    onChange={(e) => setAllowHighFee(e.target.checked)}
+                  />
+                  <span>
+                    The fee looks like a mistake: {review.feeWarning}. Tick to send anyway.
+                  </span>
+                </label>
+              )}
+            </div>
+            <PrimaryButton onClick={() => setAsking(true)} disabled={blocked}>
+              Send to {short(address)}
+            </PrimaryButton>
+            <button
+              onClick={onBack}
+              className="mt-3 h-12 w-full rounded-full border border-zinc-800 text-sm font-semibold"
+            >
+              Cancel
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

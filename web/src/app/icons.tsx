@@ -128,3 +128,38 @@ export const GearIcon = (p: Props) => (
     <path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4M15.3 15.3l-1.4-1.4M6.1 6.1 4.7 4.7" />
   </Icon>
 );
+
+export const DoubleChevronDownIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <path d="M6 5l4 4 4-4M6 11l4 4 4-4" />
+  </Icon>
+);
+
+export const ListIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <path d="M7 6h9M7 10h9M7 14h9M4 6h.01M4 10h.01M4 14h.01" />
+  </Icon>
+);
+
+export const FeeIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <circle cx="6" cy="6" r="2" />
+    <circle cx="14" cy="14" r="2" />
+    <path d="M15 5 5 15" />
+  </Icon>
+);
+
+export const EyeIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10Z" />
+    <circle cx="10" cy="10" r="2.5" />
+  </Icon>
+);
+
+export const EyeOffIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10Z" />
+    <circle cx="10" cy="10" r="2.5" />
+    <path d="M3 3l14 14" />
+  </Icon>
+);

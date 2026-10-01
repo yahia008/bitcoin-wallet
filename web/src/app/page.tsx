@@ -77,7 +77,7 @@ export default function Home() {
     // On wider screens the wallet sits in its own dark panel, a little down from the top, on
     // a lighter backdrop; on a phone it simply fills the screen.
     <main className="flex flex-1 justify-center sm:bg-zinc-800/60 sm:px-4 sm:py-16">
-      <div className="w-full max-w-md bg-background px-4 py-6 sm:min-h-[640px] sm:self-start sm:rounded-3xl sm:border sm:border-zinc-800 sm:px-6 sm:shadow-2xl">
+      <div className="flex w-full max-w-md flex-col bg-background px-4 py-6 sm:min-h-[640px] sm:self-start sm:rounded-3xl sm:border sm:border-zinc-800 sm:px-6 sm:shadow-2xl">
         {/* Keyed by account, so switching starts the dashboard fresh for that account. */}
         <WalletView
           key={active.walletId}
