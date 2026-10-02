@@ -561,15 +561,70 @@ async fn list_transactions(
     Ok(Json(txs.into_iter().map(Into::into).collect()))
 }
 
-/// Poll this to track confirmations after broadcasting.
+#[derive(Serialize)]
+struct TxIoResponse {
+    /// null for scripts with no address, or an input whose previous transaction is unknown.
+    address: Option<String>,
+    /// null for an input whose previous transaction is unknown.
+    value_sat: Option<u64>,
+    /// "receive" or "change" (ours), or "external".
+    owner: &'static str,
+}
+
+impl From<history::TxIo> for TxIoResponse {
+    fn from(io: history::TxIo) -> Self {
+        TxIoResponse {
+            address: io.address.map(|a| a.to_string()),
+            value_sat: io.value.map(|v| v.to_sat()),
+            owner: match io.owner {
+                history::Owner::Receive => "receive",
+                history::Owner::Change => "change",
+                history::Owner::External => "external",
+            },
+        }
+    }
+}
+
+/// A transaction with its inputs and outputs: the list fields plus details.
+#[derive(Serialize)]
+struct TransactionDetailResponse {
+    #[serde(flatten)]
+    summary: TransactionResponse,
+    /// Unix seconds: block time once confirmed, first seen in the mempool before that.
+    time: Option<u64>,
+    vsize: u64,
+    /// sat/vB; null unless this wallet paid the fee.
+    fee_rate_sat_vb: Option<f64>,
+    /// Signals replace-by-fee (BIP125).
+    rbf: bool,
+    inputs: Vec<TxIoResponse>,
+    outputs: Vec<TxIoResponse>,
+}
+
+impl From<history::TxDetail> for TransactionDetailResponse {
+    fn from(tx: history::TxDetail) -> Self {
+        TransactionDetailResponse {
+            summary: tx.summary.into(),
+            time: tx.time,
+            vsize: tx.vsize,
+            fee_rate_sat_vb: tx.fee_rate,
+            rbf: tx.rbf,
+            inputs: tx.inputs.into_iter().map(Into::into).collect(),
+            outputs: tx.outputs.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// One transaction with its inputs and outputs. Poll this to track confirmations after
+/// broadcasting.
 async fn get_transaction(
     State(state): State<SharedState>,
     Path((id, txid)): Path<(String, String)>,
     token: Bearer,
-) -> Result<Json<TransactionResponse>, ApiError> {
+) -> Result<Json<TransactionDetailResponse>, ApiError> {
     let txid = Txid::from_str(&txid).map_err(|_| ApiError::bad_request("invalid txid"))?;
     let tx = with_wallet(state, id, token, move |w, _| {
-        history::transaction(&w.wallet, txid).ok_or_else(|| {
+        history::transaction_detail(&w.wallet, txid).ok_or_else(|| {
             ApiError::not_found("transaction not found: not a wallet transaction, or dropped from the mempool")
         })
     })

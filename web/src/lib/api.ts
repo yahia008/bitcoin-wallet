@@ -73,7 +73,28 @@ export type Transaction = {
   block_height: number | null;
 };
 
-export type WalletAuth = { walletId: string; apiUrl: string; apiToken: string };
+/** One input or output. `address` and `value_sat` are null for an input whose previous
+ * transaction the server hasn't seen, and `address` for scripts with none (OP_RETURN). */
+export type TxIo = {
+  address: string | null;
+  value_sat: number | null;
+  /** Ours ("receive" or "change") or someone else's. */
+  owner: "receive" | "change" | "external";
+};
+
+export type TransactionDetail = Transaction & {
+  /** Unix seconds: block time once confirmed, first seen in the mempool before that. */
+  time: number | null;
+  vsize: number;
+  /** null unless this wallet paid the fee. */
+  fee_rate_sat_vb: number | null;
+  /** Signals replace-by-fee, so it can be sped up while unconfirmed. */
+  rbf: boolean;
+  inputs: TxIo[];
+  outputs: TxIo[];
+};
+
+export type WalletAuth ={ walletId: string; apiUrl: string; apiToken: string };
 
 function walletRequest<T>(
   wallet: WalletAuth,
@@ -97,6 +118,9 @@ export const getAddresses = (w: WalletAuth) => walletRequest<AddressInfo[]>(w, "
 export const newAddress = (w: WalletAuth) => walletRequest<AddressInfo>(w, "/addresses", "POST");
 /** Newest first. */
 export const getTransactions = (w: WalletAuth) => walletRequest<Transaction[]>(w, "/transactions");
+/** One transaction with its inputs and outputs. */
+export const getTransaction = (w: WalletAuth, txid: string) =>
+  walletRequest<TransactionDetail>(w, `/transactions/${txid}`);
 
 export type FeePriority = "fast" | "normal" | "slow";
 

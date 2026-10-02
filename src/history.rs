@@ -1,7 +1,7 @@
 //! Read-only views of a wallet, shared by the CLI and the API: transaction summaries and
 //! receive addresses. Call `chain::sync` first for up-to-date results.
 
-use bdk_wallet::bitcoin::{Address, Amount, SignedAmount, Txid};
+use bdk_wallet::bitcoin::{Address, Amount, ScriptBuf, SignedAmount, Txid};
 use bdk_wallet::chain::ChainPosition;
 use bdk_wallet::{KeychainKind, Wallet, WalletTx};
 
@@ -63,6 +63,86 @@ fn summarize(wallet: &Wallet, tx: &WalletTx) -> TxSummary {
         confirmations: confirmations(tip, &tx.chain_position),
         block_height,
     }
+}
+
+/// Whose an input or output is, as far as this wallet can tell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Owner {
+    /// One of our receive addresses.
+    Receive,
+    /// One of our change addresses.
+    Change,
+    /// Someone else's, or unknown.
+    External,
+}
+
+/// One input or output of a transaction.
+pub struct TxIo {
+    /// None for scripts that have no address (e.g. OP_RETURN), or an input whose previous
+    /// transaction the wallet hasn't seen.
+    pub address: Option<Address>,
+    /// None for an input whose previous transaction the wallet hasn't seen.
+    pub value: Option<Amount>,
+    pub owner: Owner,
+}
+
+/// Everything about one transaction, for a detail view.
+pub struct TxDetail {
+    pub summary: TxSummary,
+    /// Unix seconds: the block's time once confirmed, when it was first seen in the mempool
+    /// before that (None if the backend didn't say).
+    pub time: Option<u64>,
+    pub vsize: u64,
+    /// sat/vB; only set when the fee is (we paid it).
+    pub fee_rate: Option<f64>,
+    /// Signals replace-by-fee (BIP125), so it can still be sped up while unconfirmed.
+    pub rbf: bool,
+    pub inputs: Vec<TxIo>,
+    pub outputs: Vec<TxIo>,
+}
+
+/// One transaction with its inputs and outputs. None in the same cases as `transaction`.
+pub fn transaction_detail(wallet: &Wallet, txid: Txid) -> Option<TxDetail> {
+    let wtx = wallet.get_tx(txid)?;
+    let summary = summarize(wallet, &wtx);
+    let tx = &wtx.tx_node.tx;
+    let time = match &wtx.chain_position {
+        ChainPosition::Confirmed { anchor, .. } => Some(anchor.confirmation_time),
+        ChainPosition::Unconfirmed { first_seen, .. } => *first_seen,
+    };
+    let vsize = tx.vsize() as u64;
+    let fee_rate = summary.fee.map(|fee| fee.to_sat() as f64 / vsize as f64);
+    let io = |script: ScriptBuf, value: Option<Amount>| TxIo {
+        address: Address::from_script(&script, wallet.network()).ok(),
+        value,
+        owner: match wallet.derivation_of_spk(script) {
+            Some((KeychainKind::External, _)) => Owner::Receive,
+            Some((KeychainKind::Internal, _)) => Owner::Change,
+            None => Owner::External,
+        },
+    };
+    let inputs = tx
+        .input
+        .iter()
+        .map(|input| match wallet.tx_graph().get_txout(input.previous_output) {
+            Some(prev) => io(prev.script_pubkey.clone(), Some(prev.value)),
+            None => TxIo { address: None, value: None, owner: Owner::External },
+        })
+        .collect();
+    let outputs = tx
+        .output
+        .iter()
+        .map(|output| io(output.script_pubkey.clone(), Some(output.value)))
+        .collect();
+    Some(TxDetail {
+        summary,
+        time,
+        vsize,
+        fee_rate,
+        rbf: tx.is_explicitly_rbf(),
+        inputs,
+        outputs,
+    })
 }
 
 pub struct ReceiveAddress {

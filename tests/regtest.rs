@@ -102,6 +102,17 @@ fn non_custodial_send_flow() {
     assert_eq!(tx["confirmations"], 1);
     assert_eq!(tx["net_sat"], -((amount + review.fee).to_sat() as i64));
 
+    // Details: our coin goes in, the payment goes out to someone else, the rest is change.
+    assert!(tx["time"].as_u64().unwrap() > 0, "block time");
+    assert!(tx["vsize"].as_u64().unwrap() > 0);
+    assert!(tx["fee_rate_sat_vb"].as_f64().unwrap() >= 1.0);
+    assert!(tx["inputs"].as_array().unwrap().iter().all(|i| i["owner"] != "external"));
+    let outputs = tx["outputs"].as_array().unwrap();
+    let payment = outputs.iter().find(|o| o["address"] == dest.to_string()).unwrap();
+    assert_eq!(payment["owner"], "external");
+    assert_eq!(payment["value_sat"], amount.to_sat());
+    assert!(outputs.iter().any(|o| o["owner"] == "change"));
+
     // Broadcasting it again: Core refuses (outputs already exist), which is the client's
     // problem, so 400 rather than 5xx.
     assert_eq!(api_status(api.broadcast(&id, &signed)), 400);

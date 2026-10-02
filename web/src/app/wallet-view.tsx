@@ -12,7 +12,7 @@ import {
   type Balance,
   type Transaction,
 } from "@/lib/api";
-import { explorerAddressUrl, explorerTxUrl, formatBtcShort } from "@/lib/format";
+import { explorerAddressUrl, formatBtcShort } from "@/lib/format";
 import { setUpAccount } from "@/lib/accounts";
 import { forgetAccounts, saveAccount, type StoredWallet } from "@/lib/store";
 import { checkPassword, verifyReceiveAddress } from "@/lib/wallet";
@@ -36,7 +36,7 @@ import {
 import { Logo } from "./logo";
 import { PasswordCard } from "./password-card";
 import { Send } from "./send";
-import { SpeedUp } from "./speed-up";
+import { TxDetail } from "./tx-detail";
 import { Button, Card, ImportPhrase } from "./wallet-setup";
 
 type Loaded = { balance: Balance; transactions: Transaction[] };
@@ -50,7 +50,15 @@ async function fetchOverview(wallet: StoredWallet): Promise<Loaded> {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-type View = "home" | "send" | "receive" | "settings" | "wallets" | "add-wallet" | "add-account";
+type View =
+  | "home"
+  | "send"
+  | "receive"
+  | "settings"
+  | "wallets"
+  | "add-wallet"
+  | "add-account"
+  | "tx";
 
 /** The loaded wallet, as a dashboard: balance and actions up top, activity below; Receive,
  * Send and settings open as their own screens. Only sending needs the password; the rest is
@@ -75,6 +83,8 @@ export function WalletView({
   const [error, setError] = useState<string>();
   // Bumped by Refresh (and after sending) to fetch again.
   const [version, setVersion] = useState(0);
+  // The transaction shown on the "tx" screen.
+  const [txid, setTxid] = useState<string>();
 
   useEffect(() => {
     let current = true; // ignore answers that arrive after a newer request or unmount
@@ -112,6 +122,21 @@ export function WalletView({
     return (
       <Screen title="Receive" onBack={home}>
         <Receive wallet={wallet} />
+      </Screen>
+    );
+  }
+  if (view === "tx" && txid) {
+    return (
+      <Screen title="Transaction" onBack={home}>
+        <TxDetail
+          wallet={wallet}
+          txid={txid}
+          // Sped up: the replacement has a new txid, so go back to the refreshed list.
+          onChanged={() => {
+            home();
+            refresh();
+          }}
+        />
       </Screen>
     );
   }
@@ -204,9 +229,11 @@ export function WalletView({
         tabs={{
           Activity: (
             <Activity
-              wallet={wallet}
               transactions={data?.transactions}
-              onChanged={refresh}
+              onOpen={(id) => {
+                setTxid(id);
+                setView("tx");
+              }}
               onReceive={() => setView("receive")}
             />
           ),
@@ -347,14 +374,12 @@ function Tabs({ tabs }: { tabs: Record<string, React.ReactNode> }) {
 }
 
 function Activity({
-  wallet,
   transactions,
-  onChanged,
+  onOpen,
   onReceive,
 }: {
-  wallet: StoredWallet;
   transactions?: Transaction[];
-  onChanged: () => void;
+  onOpen: (txid: string) => void;
   onReceive: () => void;
 }) {
   if (!transactions) return <p className="py-8 text-center text-sm text-zinc-500">Loading…</p>;
@@ -377,7 +402,7 @@ function Activity({
   return (
     <ul className="scroll-list max-h-[420px] divide-y divide-zinc-800 overflow-y-auto pr-1">
       {transactions.map((tx) => (
-        <TxRow key={tx.txid} tx={tx} wallet={wallet} onChanged={onChanged} />
+        <TxRow key={tx.txid} tx={tx} onOpen={() => onOpen(tx.txid)} />
       ))}
     </ul>
   );
@@ -837,26 +862,18 @@ function Settings({
   );
 }
 
-function TxRow({
-  tx,
-  wallet,
-  onChanged,
-}: {
-  tx: Transaction;
-  wallet: StoredWallet;
-  onChanged: () => void;
-}) {
-  const [speedingUp, setSpeedingUp] = useState(false);
-  const url = explorerTxUrl(wallet.network, tx.txid);
+/** One transaction in the activity list; opens its detail screen. */
+function TxRow({ tx, onOpen }: { tx: Transaction; onOpen: () => void }) {
   const received = tx.net_sat >= 0;
-  // Only transactions we paid the fee for (we sent them), and only while unconfirmed.
-  const canSpeedUp = !tx.confirmed && tx.fee_sat !== null;
   const status = tx.confirmed
     ? `${tx.confirmations} confirmation${tx.confirmations === 1 ? "" : "s"}`
     : "Unconfirmed";
   return (
-    <li className="py-3">
-      <div className="flex items-center gap-3">
+    <li>
+      <button
+        onClick={onOpen}
+        className="flex w-full items-center gap-3 rounded-xl px-1 py-3 text-left hover:bg-zinc-800/40"
+      >
         <span
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
             received ? "bg-lime-500/15 text-lime-300" : "bg-violet-500/15 text-violet-300"
@@ -864,49 +881,24 @@ function TxRow({
         >
           {received ? <ArrowDownIcon /> : <ArrowUpIcon />}
         </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold">{received ? "Received" : "Sent"}</p>
-          <p className="truncate text-xs text-zinc-500">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold">{received ? "Received" : "Sent"}</span>
+          <span className="block truncate text-xs text-zinc-500">
             {status}
             {tx.fee_sat !== null && ` · fee ${formatBtcShort(tx.fee_sat)}`}
             {" · "}
-            {url ? (
-              <a href={url} target="_blank" rel="noreferrer" className="underline">
-                {tx.txid.slice(0, 8)}…
-              </a>
-            ) : (
-              <span className="font-mono">{tx.txid.slice(0, 8)}…</span>
-            )}
-          </p>
-        </div>
-        <p
+            <span className="font-mono">{tx.txid.slice(0, 8)}…</span>
+          </span>
+        </span>
+        <span
           className={`shrink-0 text-sm font-semibold tabular-nums ${
             received ? "text-lime-300" : ""
           }`}
         >
           {received ? "+" : ""}
           {formatBtcShort(tx.net_sat)}
-        </p>
-      </div>
-      {canSpeedUp && !speedingUp && (
-        <button
-          className="mt-2 ml-12 text-xs font-semibold text-violet-300 hover:underline"
-          onClick={() => setSpeedingUp(true)}
-        >
-          Speed up
-        </button>
-      )}
-      {speedingUp && (
-        <SpeedUp
-          wallet={wallet}
-          txid={tx.txid}
-          onCancel={() => setSpeedingUp(false)}
-          onDone={() => {
-            setSpeedingUp(false);
-            onChanged();
-          }}
-        />
-      )}
+        </span>
+      </button>
     </li>
   );
 }
