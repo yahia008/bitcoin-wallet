@@ -54,7 +54,7 @@ sudo npx playwright install-deps chromium  # the system libraries it needs (libn
 | `import-wallet` | Pasting 12 words (hidden until Show), pasting 24 words switches to 24 boxes, a misspelled word is named by its number |
 | `receive` | The receive address stays the same until used, then moves on; Addresses shows Used / Unused |
 | `send` | The address step names a wrong network and catches a one-character typo; 50% → review sheet → transaction details → a wrong password is refused → sent; Max sends everything with no change and leaves 0 |
-| `speed-up` | Speed up an unconfirmed send: the node's mempool drops the original and holds exactly one replacement |
+| `speed-up` | Opening an unconfirmed send shows its details (status, your change); Speed up there makes the node's mempool drop the original and hold exactly one replacement |
 | `accounts` | Rename an account; adding one refuses a wrong password and another wallet's phrase; Account 2 is added; balances show per account and switching works |
 
 If a test fails, Playwright saves a screenshot and a trace in `web/e2e-results/`

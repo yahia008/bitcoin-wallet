@@ -2,10 +2,11 @@
 
 A non-custodial Bitcoin wallet in Rust, built on [BDK](https://bitcoindevkit.org) and Bitcoin Core. It comes as:
 
-- **a CLI** that holds your keys and can do everything on its own, and
-- **a watch-only HTTP API** that can see wallets and build transactions but **never holds private keys**. The CLI signs, and the server broadcasts.
+- **a CLI** that holds your keys and can do everything on its own,
+- **a watch-only HTTP API** that can see wallets and build transactions but **never holds private keys**: clients sign, and the server broadcasts, and
+- **a web wallet, Osok** (`web/`), that keeps its keys in the browser and signs with the same Rust code, compiled to WebAssembly.
 
-It currently runs on **regtest** only.
+It runs on **regtest** (the default), **testnet4**, **testnet** and **signet**; mainnet is refused for now. [architecture.md](architecture.md) explains how the pieces fit together.
 
 ## Features
 
@@ -120,7 +121,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
 | GET | `/wallets/{id}/transactions` | | `[{txid, net_sat, fee_sat, confirmed, confirmations, block_height}]` |
-| GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations) |
+| GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations), plus `time` (block time, or first seen while unconfirmed), `vsize`, `fee_rate_sat_vb`, `rbf`, and `inputs` / `outputs` as `[{address, value_sat, owner}]` where `owner` is `receive` or `change` (ours) or `external` |
 | POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?, fee_priority?, send_all?}` | unsigned PSBT (base64) + summary. `fee_priority` is `fast`, `normal` (default) or `slow`; an exact `fee_rate_sat_vb` overrides it. `send_all` sends everything spendable minus the fee, with no change; `amount_sat` is then ignored and the response says what it came to |
 | POST | `/wallets/{id}/bump` | `{txid, fee_rate_sat_vb?, fee_priority?}` | unsigned replacement PSBT (RBF) + `original_tx` (hex). `fee_priority` defaults to `fast` |
 | POST | `/wallets/{id}/broadcast` | `{psbt}` signed PSBT (base64) | `{txid}` |
@@ -149,7 +150,7 @@ cargo run --bin server -- --network testnet4 --data-dir server-testnet4   # API 
 cd web && npm install && npm run dev                                       # wallet on :3001
 ```
 
-Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Once set up, it shows the balance, a receive address with a QR code, and the transaction history. Every receive address the server hands out is re-derived in the browser from the wallet's own public descriptor and refused if it differs, so a compromised server can't show its own address as yours. Sending works like the CLI's `send --server`: the server builds an unsigned PSBT, the browser checks it with the same `review` and `check_fee` code (in WASM), shows the amount, fee, rate and change, and on your password decrypts the key and signs inside WASM, so the key never reaches JavaScript. A fee that looks like a mistake has to be confirmed explicitly. Unconfirmed transactions you sent get a "Speed up" button (RBF, like the CLI's `bump --server`): the server builds the replacement and sends the original along, and the browser runs `review_bump` (the original's txid must match, every payment must be unchanged, the fee must be higher) before you sign.
+Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Once set up, it shows the balance, a receive address with a QR code, and the transaction history. Every receive address the server hands out is re-derived in the browser from the wallet's own public descriptor and refused if it differs, so a compromised server can't show its own address as yours. Sending works like the CLI's `send --server`: the server builds an unsigned PSBT, the browser checks it with the same `review` and `check_fee` code (in WASM), shows the amount, fee, rate and change, and on your password decrypts the key and signs inside WASM, so the key never reaches JavaScript. A fee that looks like a mistake has to be confirmed explicitly. Tapping a transaction opens its details: date, block, fee and rate, size, the txid with an explorer link, and where the coins came from and went, with your own addresses and change marked. Unconfirmed transactions you sent get a "Speed up" button there (RBF, like the CLI's `bump --server`): the server builds the replacement and sends the original along, and the browser runs `review_bump` (the original's txid must match, every payment must be unchanged, the fee must be higher) before you sign.
 
 For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d bitcoind`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
@@ -200,11 +201,15 @@ tests/regtest.rs    end-to-end test
 wallet-core/        keys, PSBT review and signing with no I/O; shared by the CLI and the browser
 wallet-wasm/        JavaScript bindings for wallet-core
 web/                web wallet (Next.js, static export)
+web/e2e/            browser tests (Playwright)
+docker-compose.yml  node + API server + web wallet; Dockerfile.server, Dockerfile.web
+fund                regtest faucet: ./fund <address> [btc], ./fund mine
+architecture.md     how it all fits together, with diagrams
 ```
 
 ## Known limitations
 
-- Regtest only; the coin type and network are fixed in `keys.rs` and `lib.rs`.
+- No mainnet yet: the coin type is fixed to `1'` (test networks) in `keys.rs`, and `--network mainnet` is refused.
 - The API has no TLS.
-- A lost API token can't be recovered; the server admin has to delete the wallet so it can be registered again.
+- One API token per wallet: recovering it (by proving key ownership) signs out every other copy of that wallet on the server.
 - Coin reservations and rate-limit counts live in memory, so a server restart clears them.
