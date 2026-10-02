@@ -9,6 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown && cargo install wasm-pack --locked
 WORKDIR /src
+# wasm-bindgen-cli must match the wasm-bindgen version in Cargo.lock. Installing it here,
+# rather than letting wasm-pack download it mid-build, keeps it in a cached layer.
+COPY Cargo.lock ./
+RUN cargo install wasm-bindgen-cli --locked --version \
+    "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
 # Two parallel compile jobs keep peak memory low enough for a small WSL/Docker VM.
 ENV CARGO_BUILD_JOBS=2
 COPY . .
