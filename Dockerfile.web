@@ -16,6 +16,8 @@ RUN cargo install wasm-bindgen-cli --locked --version \
     "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
 # Two parallel compile jobs keep peak memory low enough for a small WSL/Docker VM.
 ENV CARGO_BUILD_JOBS=2
+# More retries, one download per connection: crates.io downloads drop on flaky networks.
+ENV CARGO_NET_RETRY=10 CARGO_HTTP_MULTIPLEXING=false
 COPY . .
 # Same cargo caches as Dockerfile.server (own target/), so a code change recompiles only our crates.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \

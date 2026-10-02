@@ -5,6 +5,8 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 # Two parallel compile jobs keep peak memory low enough for a small WSL/Docker VM.
 ENV CARGO_BUILD_JOBS=2
+# More retries, one download per connection: crates.io downloads drop on flaky networks.
+ENV CARGO_NET_RETRY=10 CARGO_HTTP_MULTIPLEXING=false
 COPY . .
 # Cache mounts keep downloaded crates and compiled dependencies between builds, so a code
 # change only recompiles our own crates. target/ lives in the cache, so copy the binary out.
