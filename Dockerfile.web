@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # The web wallet (web/), for `docker compose up`: wallet-wasm compiled to WebAssembly, the
 # Next.js static export, served by nginx. The page talks to the API from the browser, so the
 # API URL is the one the browser sees (the host's port 3000), fixed at build time.
@@ -8,15 +9,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown && cargo install wasm-pack --locked
 WORKDIR /src
+# Two parallel compile jobs keep peak memory low enough for a small WSL/Docker VM.
+ENV CARGO_BUILD_JOBS=2
 COPY . .
-RUN wasm-pack build wallet-wasm --target web --profile wasm --out-dir ../web/src/wasm --no-pack
+# Same cargo caches as Dockerfile.server (own target/), so a code change recompiles only our crates.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=target-wasm,target=/src/target \
+    --mount=type=cache,id=wasm-pack,target=/root/.cache/.wasm-pack \
+    wasm-pack build wallet-wasm --target web --profile wasm --out-dir ../web/src/wasm --no-pack
 
 # 2. The static site.
 FROM node:22-bookworm AS site
 ARG API_URL=http://127.0.0.1:3000
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,id=npm,target=/root/.npm npm ci
 COPY web/ ./
 COPY --from=wasm /src/web/src/wasm ./src/wasm
 # `next build` directly: `npm run build` would try to rebuild the WASM first.

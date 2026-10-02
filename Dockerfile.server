@@ -1,14 +1,22 @@
+# syntax=docker/dockerfile:1
 # The watch-only API server (src/bin/server.rs), for `docker compose up`.
 
 FROM rust:1-bookworm AS build
 WORKDIR /src
+# Two parallel compile jobs keep peak memory low enough for a small WSL/Docker VM.
+ENV CARGO_BUILD_JOBS=2
 COPY . .
-RUN cargo build --release --bin server
+# Cache mounts keep downloaded crates and compiled dependencies between builds, so a code
+# change only recompiles our own crates. target/ lives in the cache, so copy the binary out.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=target-server,target=/src/target \
+    cargo build --release --bin server && cp target/release/server /usr/local/bin/server
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/server /usr/local/bin/server
+COPY --from=build /usr/local/bin/server /usr/local/bin/server
 VOLUME /data
 EXPOSE 3000
 ENTRYPOINT ["server"]
