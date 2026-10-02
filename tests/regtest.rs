@@ -112,6 +112,9 @@ fn non_custodial_send_flow() {
     assert_eq!(payment["owner"], "external");
     assert_eq!(payment["value_sat"], amount.to_sat());
     assert!(outputs.iter().any(|o| o["owner"] == "change"));
+    // The list carries the time too, for dates on each row.
+    let list = http("GET", &format!("{wallet_url}/transactions"), &token);
+    assert!(list.as_array().unwrap().iter().all(|t| t["time"].as_u64().unwrap() > 0));
 
     // Broadcasting it again: Core refuses (outputs already exist), which is the client's
     // problem, so 400 rather than 5xx.

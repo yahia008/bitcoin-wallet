@@ -120,8 +120,8 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | GET | `/wallets/{id}/balance` | | `{confirmed_sat, unconfirmed_sat, immature_sat, total_sat}` |
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
-| GET | `/wallets/{id}/transactions` | | `[{txid, net_sat, fee_sat, confirmed, confirmations, block_height}]` |
-| GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations), plus `time` (block time, or first seen while unconfirmed), `vsize`, `fee_rate_sat_vb`, `rbf`, and `inputs` / `outputs` as `[{address, value_sat, owner}]` where `owner` is `receive` or `change` (ours) or `external` |
+| GET | `/wallets/{id}/transactions` | | `[{txid, net_sat, fee_sat, confirmed, confirmations, block_height, time}]`; `time` is Unix seconds: block time, or first seen while unconfirmed |
+| GET | `/wallets/{id}/transactions/{txid}` | | one transaction (poll this for confirmations), plus `vsize`, `fee_rate_sat_vb`, `rbf`, and `inputs` / `outputs` as `[{address, value_sat, owner}]` where `owner` is `receive` or `change` (ours) or `external` |
 | POST | `/wallets/{id}/psbt` | `{address, amount_sat, fee_rate_sat_vb?, fee_priority?, send_all?}` | unsigned PSBT (base64) + summary. `fee_priority` is `fast`, `normal` (default) or `slow`; an exact `fee_rate_sat_vb` overrides it. `send_all` sends everything spendable minus the fee, with no change; `amount_sat` is then ignored and the response says what it came to |
 | POST | `/wallets/{id}/bump` | `{txid, fee_rate_sat_vb?, fee_priority?}` | unsigned replacement PSBT (RBF) + `original_tx` (hex). `fee_priority` defaults to `fast` |
 | POST | `/wallets/{id}/broadcast` | `{psbt}` signed PSBT (base64) | `{txid}` |

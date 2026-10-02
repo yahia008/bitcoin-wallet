@@ -16,6 +16,9 @@ pub struct TxSummary {
     pub confirmations: u32,
     /// None while unconfirmed.
     pub block_height: Option<u32>,
+    /// Unix seconds: the block's time once confirmed, when it was first seen in the mempool
+    /// before that (None if the backend didn't say).
+    pub time: Option<u64>,
 }
 
 impl TxSummary {
@@ -52,9 +55,11 @@ fn summarize(wallet: &Wallet, tx: &WalletTx) -> TxSummary {
         Ok(fee) if sent.to_sat() > 0 => Some(fee),
         _ => None,
     };
-    let block_height = match &tx.chain_position {
-        ChainPosition::Unconfirmed { .. } => None,
-        ChainPosition::Confirmed { anchor, .. } => Some(anchor.block_id.height),
+    let (block_height, time) = match &tx.chain_position {
+        ChainPosition::Unconfirmed { first_seen, .. } => (None, *first_seen),
+        ChainPosition::Confirmed { anchor, .. } => {
+            (Some(anchor.block_id.height), Some(anchor.confirmation_time))
+        }
     };
     TxSummary {
         txid: tx.tx_node.txid,
@@ -62,6 +67,7 @@ fn summarize(wallet: &Wallet, tx: &WalletTx) -> TxSummary {
         fee,
         confirmations: confirmations(tip, &tx.chain_position),
         block_height,
+        time,
     }
 }
 
@@ -89,9 +95,6 @@ pub struct TxIo {
 /// Everything about one transaction, for a detail view.
 pub struct TxDetail {
     pub summary: TxSummary,
-    /// Unix seconds: the block's time once confirmed, when it was first seen in the mempool
-    /// before that (None if the backend didn't say).
-    pub time: Option<u64>,
     pub vsize: u64,
     /// sat/vB; only set when the fee is (we paid it).
     pub fee_rate: Option<f64>,
@@ -106,10 +109,6 @@ pub fn transaction_detail(wallet: &Wallet, txid: Txid) -> Option<TxDetail> {
     let wtx = wallet.get_tx(txid)?;
     let summary = summarize(wallet, &wtx);
     let tx = &wtx.tx_node.tx;
-    let time = match &wtx.chain_position {
-        ChainPosition::Confirmed { anchor, .. } => Some(anchor.confirmation_time),
-        ChainPosition::Unconfirmed { first_seen, .. } => *first_seen,
-    };
     let vsize = tx.vsize() as u64;
     let fee_rate = summary.fee.map(|fee| fee.to_sat() as f64 / vsize as f64);
     let io = |script: ScriptBuf, value: Option<Amount>| TxIo {
@@ -136,7 +135,6 @@ pub fn transaction_detail(wallet: &Wallet, txid: Txid) -> Option<TxDetail> {
         .collect();
     Some(TxDetail {
         summary,
-        time,
         vsize,
         fee_rate,
         rbf: tx.is_explicitly_rbf(),

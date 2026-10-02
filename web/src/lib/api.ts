@@ -71,6 +71,8 @@ export type Transaction = {
   confirmed: boolean;
   confirmations: number;
   block_height: number | null;
+  /** Unix seconds: block time once confirmed, first seen in the mempool before that. */
+  time: number | null;
 };
 
 /** One input or output. `address` and `value_sat` are null for an input whose previous
@@ -83,8 +85,6 @@ export type TxIo = {
 };
 
 export type TransactionDetail = Transaction & {
-  /** Unix seconds: block time once confirmed, first seen in the mempool before that. */
-  time: number | null;
   vsize: number;
   /** null unless this wallet paid the fee. */
   fee_rate_sat_vb: number | null;

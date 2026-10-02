@@ -27,6 +27,19 @@ export function formatBtcShort(sats: number): string {
   return formatBtc(sats).replace(/\.?0+$/, "");
 }
 
+/** A transaction's time for lists: "Oct 2, 14:05", with the year only if it isn't this
+ * year's. `unixSeconds` as the API sends it. */
+export function formatTxTime(unixSeconds: number, now = new Date()): string {
+  const date = new Date(unixSeconds * 1000);
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 const EXPLORERS: Record<string, string> = {
   testnet4: "https://mempool.space/testnet4",
   testnet: "https://blockstream.info/testnet",

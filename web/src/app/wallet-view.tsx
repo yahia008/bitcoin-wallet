@@ -12,7 +12,7 @@ import {
   type Balance,
   type Transaction,
 } from "@/lib/api";
-import { explorerAddressUrl, formatBtcShort } from "@/lib/format";
+import { explorerAddressUrl, formatBtcShort, formatTxTime } from "@/lib/format";
 import { setUpAccount } from "@/lib/accounts";
 import { forgetAccounts, saveAccount, type StoredWallet } from "@/lib/store";
 import { checkPassword, verifyReceiveAddress } from "@/lib/wallet";
@@ -884,10 +884,8 @@ function TxRow({ tx, onOpen }: { tx: Transaction; onOpen: () => void }) {
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold">{received ? "Received" : "Sent"}</span>
           <span className="block truncate text-xs text-zinc-500">
+            {tx.time !== null && `${formatTxTime(tx.time)} · `}
             {status}
-            {tx.fee_sat !== null && ` · fee ${formatBtcShort(tx.fee_sat)}`}
-            {" · "}
-            <span className="font-mono">{tx.txid.slice(0, 8)}…</span>
           </span>
         </span>
         <span

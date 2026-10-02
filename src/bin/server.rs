@@ -537,6 +537,8 @@ struct TransactionResponse {
     confirmed: bool,
     confirmations: u32,
     block_height: Option<u32>,
+    /// Unix seconds: block time once confirmed, first seen in the mempool before that.
+    time: Option<u64>,
 }
 
 impl From<history::TxSummary> for TransactionResponse {
@@ -548,6 +550,7 @@ impl From<history::TxSummary> for TransactionResponse {
             confirmed: tx.block_height.is_some(),
             confirmations: tx.confirmations,
             block_height: tx.block_height,
+            time: tx.time,
         }
     }
 }
@@ -590,8 +593,6 @@ impl From<history::TxIo> for TxIoResponse {
 struct TransactionDetailResponse {
     #[serde(flatten)]
     summary: TransactionResponse,
-    /// Unix seconds: block time once confirmed, first seen in the mempool before that.
-    time: Option<u64>,
     vsize: u64,
     /// sat/vB; null unless this wallet paid the fee.
     fee_rate_sat_vb: Option<f64>,
@@ -605,7 +606,6 @@ impl From<history::TxDetail> for TransactionDetailResponse {
     fn from(tx: history::TxDetail) -> Self {
         TransactionDetailResponse {
             summary: tx.summary.into(),
-            time: tx.time,
             vsize: tx.vsize,
             fee_rate_sat_vb: tx.fee_rate,
             rbf: tx.rbf,
