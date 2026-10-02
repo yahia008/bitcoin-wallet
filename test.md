@@ -13,7 +13,7 @@ There are two ways to test the project:
 cd ~/bitcoin_wallet/bitcoin-wallet
 
 cargo test --workspace                       # 49 unit tests, no node needed
-docker compose up -d                         # start Bitcoin Core (regtest)
+docker compose up -d bitcoind                         # start Bitcoin Core (regtest)
 cargo test --test regtest -- --ignored       # 4 end-to-end API tests against the node
 cd web && npm run e2e                        # 10 browser tests of the web wallet (see below)
 ```
@@ -72,7 +72,7 @@ If a test fails, Playwright saves a screenshot and a trace in `web/e2e-results/`
 ```bash
 cd ~/bitcoin_wallet/bitcoin-wallet
 cargo build
-docker compose up -d
+docker compose up -d bitcoind
 
 # No "-it" here: with -it, $(bcli ...) returns a hidden carriage return that breaks addresses.
 alias bcli='docker exec bitcoind-regtest bitcoin-cli -regtest -rpcuser=wallet -rpcpassword=wallet'

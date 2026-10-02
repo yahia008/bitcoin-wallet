@@ -1,3 +1,11 @@
+# `docker compose up` runs the whole wallet on regtest: the Bitcoin node, the API server and
+# the web wallet. Open http://localhost:3001, and fund a wallet with ./fund <address> [btc].
+#
+# Only the node, for the tests or for running the server/site yourself:
+#   docker compose up -d bitcoind
+#
+# Everything listens on localhost only.
+
 services:
   bitcoind:
     image: bitcoin/bitcoin:latest
@@ -15,6 +23,42 @@ services:
       - "127.0.0.1:18443:18443"
     volumes:
       - bitcoin-data:/home/bitcoin/.bitcoin
+    # Healthy once RPC answers (not while it's still loading blocks), so the API waits.
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=wallet", "-rpcpassword=wallet", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    command:
+      - --network=regtest
+      - --backend=core
+      - --rpc-url=http://bitcoind:18443
+      - --data-dir=/data
+      - --listen=0.0.0.0:3000
+      - --cors-origins=http://localhost:3001,http://127.0.0.1:3001
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - api-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:3001:80"
 
 volumes:
   bitcoin-data:
+  api-data:

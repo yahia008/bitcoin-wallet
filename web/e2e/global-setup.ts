@@ -7,7 +7,7 @@ export default async function globalSetup() {
   try {
     await rpc("getblockcount");
   } catch (e) {
-    throw new Error(`Can't reach the regtest node (${e}). Start it first: docker compose up -d`);
+    throw new Error(`Can't reach the regtest node (${e}). Start it first: docker compose up -d bitcoind`);
   }
   const loaded = await rpc<string[]>("listwallets");
   if (!loaded.includes(FUNDER)) {

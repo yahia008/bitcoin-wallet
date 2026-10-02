@@ -21,7 +21,7 @@ time. The API server must list this page's origin in `--cors-origins`.
 ## End-to-end tests
 
 ```bash
-docker compose up -d   # in the repo root: the regtest node
+docker compose up -d bitcoind   # in the repo root: the regtest node
 npm run e2e            # build, start a throwaway API server, click through every flow
 ```
 

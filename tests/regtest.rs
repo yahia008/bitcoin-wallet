@@ -1,7 +1,7 @@
 //! End-to-end test of the non-custodial API flow against a live regtest node, using the real
 //! `server` binary. Needs the node from docker-compose.yml, so it's ignored by default:
 //!
-//!     docker compose up -d
+//!     docker compose up -d bitcoind
 //!     cargo test -- --ignored
 
 use std::net::TcpListener;
@@ -26,7 +26,7 @@ const RPC_URL: &str = "http://127.0.0.1:18443";
 const FUNDER: &str = "itest-funder";
 
 #[test]
-#[ignore = "needs the regtest node: docker compose up -d"]
+#[ignore = "needs the regtest node: docker compose up -d bitcoind"]
 fn non_custodial_send_flow() {
     let funder = funder_wallet();
 
@@ -131,7 +131,7 @@ fn non_custodial_send_flow() {
 }
 
 #[test]
-#[ignore = "needs the regtest node: docker compose up -d"]
+#[ignore = "needs the regtest node: docker compose up -d bitcoind"]
 fn registration_is_rate_limited() {
     let server = Server::start_with(&["--register-limit-per-hour", "2"]);
     let api = ApiClient::new(&server.url);
@@ -162,7 +162,7 @@ fn registration_is_rate_limited() {
 }
 
 #[test]
-#[ignore = "needs the regtest node: docker compose up -d"]
+#[ignore = "needs the regtest node: docker compose up -d bitcoind"]
 fn birthday_skips_earlier_blocks() {
     let funder = funder_wallet();
     let wallet = random_wallet();
@@ -203,7 +203,7 @@ fn birthday_skips_earlier_blocks() {
 }
 
 #[test]
-#[ignore = "needs the regtest node: docker compose up -d"]
+#[ignore = "needs the regtest node: docker compose up -d bitcoind"]
 fn lost_token_is_recovered_by_proving_key_ownership() {
     let server = Server::start();
     let mnemonic: GeneratedKey<Mnemonic, Segwitv0> =

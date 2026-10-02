@@ -1,0 +1,28 @@
+# The web wallet (web/), for `docker compose up`: wallet-wasm compiled to WebAssembly, the
+# Next.js static export, served by nginx. The page talks to the API from the browser, so the
+# API URL is the one the browser sees (the host's port 3000), fixed at build time.
+
+# 1. Rust -> WebAssembly (needs clang for secp256k1's C code).
+FROM rust:1-bookworm AS wasm
+RUN apt-get update && apt-get install -y --no-install-recommends clang \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup target add wasm32-unknown-unknown && cargo install wasm-pack --locked
+WORKDIR /src
+COPY . .
+RUN wasm-pack build wallet-wasm --target web --profile wasm --out-dir ../web/src/wasm --no-pack
+
+# 2. The static site.
+FROM node:22-bookworm AS site
+ARG API_URL=http://127.0.0.1:3000
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+COPY --from=wasm /src/web/src/wasm ./src/wasm
+# `next build` directly: `npm run build` would try to rebuild the WASM first.
+RUN NEXT_PUBLIC_API_URL=$API_URL npx next build
+
+# 3. Serve it.
+FROM nginx:1-alpine
+COPY --from=site /src/web/out /usr/share/nginx/html
+EXPOSE 80

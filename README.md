@@ -20,13 +20,37 @@ It currently runs on **regtest** only.
 - Confirmation tracking (`status --watch`, or polling the API)
 - Only the account key (m/84'/1'/0') is kept, encrypted at rest (Argon2id + XChaCha20-Poly1305); the mnemonic is never stored. Wallet state in SQLite
 
+## Run everything with one command
+
+Requirements: Docker only.
+
+```bash
+docker compose up        # Bitcoin node (regtest) + API server + web wallet
+```
+
+Open **http://localhost:3001**, create or import a wallet, then give it test coins from the
+Receive screen's address:
+
+```bash
+./fund <address> 2       # sends 2 BTC and mines a block to confirm it
+./fund mine              # mines a block, e.g. to confirm something you sent
+```
+
+The first `docker compose up` compiles the Rust server and the WebAssembly, so it takes several
+minutes; later starts are quick. Stop with Ctrl+C (or `docker compose down`). Wallets on the API
+server and the node's chain are kept in Docker volumes between runs; `docker compose down -v`
+wipes them. Everything listens on localhost only.
+
+For working on the code, run the pieces yourself instead (below): `docker compose up -d bitcoind`
+starts just the node.
+
 ## Quick start
 
 Requirements: Rust (stable) and Docker.
 
 ```bash
 # 1. Start Bitcoin Core on regtest
-docker compose up -d
+docker compose up -d bitcoind
 alias bcli='docker exec -it bitcoind-regtest bitcoin-cli -regtest -rpcuser=wallet -rpcpassword=wallet'
 bcli createwallet miner
 bcli -generate 101                 # coinbase needs 100 confirmations to be spendable
@@ -127,7 +151,7 @@ cd web && npm install && npm run dev                                       # wal
 
 Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Once set up, it shows the balance, a receive address with a QR code, and the transaction history. Every receive address the server hands out is re-derived in the browser from the wallet's own public descriptor and refused if it differs, so a compromised server can't show its own address as yours. Sending works like the CLI's `send --server`: the server builds an unsigned PSBT, the browser checks it with the same `review` and `check_fee` code (in WASM), shows the amount, fee, rate and change, and on your password decrypts the key and signs inside WASM, so the key never reaches JavaScript. A fee that looks like a mistake has to be confirmed explicitly. Unconfirmed transactions you sent get a "Speed up" button (RBF, like the CLI's `bump --server`): the server builds the replacement and sends the original along, and the browser runs `review_bump` (the original's txid must match, every payment must be unchanged, the fee must be higher) before you sign.
 
-For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
+For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d bitcoind`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
 
 ## Security model
 
@@ -153,7 +177,7 @@ CLI (your machine)                         API server (watch-only)          Core
 
 ```bash
 cargo test --workspace                   # unit tests: encryption, descriptor checks, PSBT attack cases
-docker compose up -d
+docker compose up -d bitcoind
 cargo test --test regtest -- --ignored   # end-to-end: real server + regtest, full non-custodial send
 cd web && npm run e2e                    # browser tests: a real browser clicks through the web wallet
 ```

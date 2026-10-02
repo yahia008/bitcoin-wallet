@@ -1,0 +1,14 @@
+# The watch-only API server (src/bin/server.rs), for `docker compose up`.
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bin server
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/server /usr/local/bin/server
+VOLUME /data
+EXPOSE 3000
+ENTRYPOINT ["server"]

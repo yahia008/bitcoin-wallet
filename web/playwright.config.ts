@@ -1,6 +1,6 @@
 // End-to-end tests: a real browser clicking through the wallet, against a throwaway API
 // server and the regtest node. Run with `npm run e2e` (the node must be up:
-// `docker compose up -d` in the repo root). See e2e/README.md.
+// `docker compose up -d bitcoind` in the repo root). See e2e/README.md.
 
 import { defineConfig } from "@playwright/test";
 

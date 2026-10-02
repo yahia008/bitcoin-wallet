@@ -8,7 +8,7 @@ This demo runs every MVP feature in order on regtest. It uses a fresh `demo.sqli
 cd ~/bitcoin_wallet/bitcoin-wallet
 cargo build                                   # compile once so the demo runs fast
 
-docker compose up -d                          # start Bitcoin Core (regtest)
+docker compose up -d bitcoind                          # start Bitcoin Core (regtest)
 
 # Shortcuts. Note: this bcli has NO "-it". With -it, $(bcli ...) gets a hidden
 # carriage return at the end, which breaks addresses passed on to other commands.

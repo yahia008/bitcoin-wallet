@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Sends test coins to an address on the regtest node and mines a block to confirm them.
+#
+#   ./fund <address> [btc]     default 1 BTC
+#   ./fund mine [blocks]       just mine, e.g. to confirm a send (default 1)
+#
+# Pays from a node wallet called "faucet", created and filled with mined coins on first use.
+# Needs the node running: docker compose up (or docker compose up -d bitcoind).
+set -euo pipefail
+
+cli() {
+  docker exec bitcoind-regtest bitcoin-cli -regtest -rpcuser=wallet -rpcpassword=wallet "$@"
+}
+
+if ! cli getblockcount >/dev/null 2>&1; then
+  echo "The regtest node isn't running. Start it with: docker compose up -d bitcoind" >&2
+  exit 1
+fi
+
+# The faucet wallet: load it, or create it the first time.
+if ! cli listwallets | grep -q '"faucet"'; then
+  cli loadwallet faucet >/dev/null 2>&1 || cli createwallet faucet >/dev/null
+fi
+mine() { cli -rpcwallet=faucet -generate "${1:-1}" >/dev/null; }
+# Mined coins can only be spent after 100 confirmations, so mine 101 the first time.
+if [ "$(cli -rpcwallet=faucet getbalance | cut -d. -f1)" -lt 50 ]; then
+  echo "Filling the faucet (first run)..."
+  mine 101
+fi
+
+if [ "${1:-}" = "mine" ]; then
+  mine "${2:-1}"
+  echo "Mined ${2:-1} block(s). Height: $(cli getblockcount)"
+  exit 0
+fi
+
+if [ $# -lt 1 ]; then
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  exit 1
+fi
+
+txid=$(cli -rpcwallet=faucet sendtoaddress "$1" "${2:-1}")
+mine 1
+echo "Sent ${2:-1} BTC to $1 and mined a block."
+echo "txid: $txid"

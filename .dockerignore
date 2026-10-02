@@ -1,0 +1,14 @@
+# Keep the Docker build context small: no build output, dependencies or local wallets.
+target/
+web/node_modules/
+web/.next/
+web/out/
+web/e2e-build/
+web/e2e-server-data/
+web/e2e-report/
+web/e2e-results/
+web/src/wasm/
+*.sqlite
+*.sqlite-*
+server-*/
+.git/
