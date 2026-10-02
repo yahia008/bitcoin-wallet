@@ -12,9 +12,10 @@ There are two ways to test the project:
 ```bash
 cd ~/bitcoin_wallet/bitcoin-wallet
 
-cargo test                       # 21 unit tests, no node needed
-docker compose up -d             # start Bitcoin Core (regtest)
-cargo test -- --include-ignored  # 24 tests: the 21 above plus the 3 end-to-end regtest tests
+cargo test --workspace                       # 49 unit tests, no node needed
+docker compose up -d                         # start Bitcoin Core (regtest)
+cargo test --test regtest -- --ignored       # 4 end-to-end API tests against the node
+cd web && npm run e2e                        # 10 browser tests of the web wallet (see below)
 ```
 
 | Test | What it checks |
@@ -27,9 +28,38 @@ cargo test -- --include-ignored  # 24 tests: the 21 above plus the 3 end-to-end 
 | `chain::tests::*` | The birthday is saved and read back, and wallets without one scan from genesis |
 | `birthday_skips_earlier_blocks` (`tests/regtest.rs`) | Registered with a birthday after its funding block, a wallet shows 0; with the right birthday it finds the coin. A birthday past the tip is `400` |
 | `registration_is_rate_limited` (`tests/regtest.rs`) | With a limit of 2 registrations per hour, the 3rd gets `429` with a `Retry-After` header |
+| `lost_token_is_recovered_by_proving_key_ownership` (`tests/regtest.rs`) | A forged signature is refused, the owner's signature gets a new token, a challenge can't be reused, and the old token stops working |
 | `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, token auth (missing, wrong, other wallet's, re-register), fund, build the PSBT, review, sign, broadcast, confirm, coin reservations |
 
 Every test should report `ok`.
+
+### Browser tests of the web wallet (`web/e2e/`)
+
+A real browser (Chromium, driven by Playwright) clicks through the web wallet against a
+throwaway API server and the regtest node, the same way a person would. `npm run e2e` builds
+the site into `web/e2e-build/` (your normal build in `out/` is untouched), starts both
+servers, runs the tests one by one and shuts everything down.
+
+One-time setup on a new machine:
+
+```bash
+cd web
+npx playwright install chromium            # the browser
+sudo npx playwright install-deps chromium  # the system libraries it needs (libnss3, …)
+```
+
+| Test | What it checks |
+|---|---|
+| `create-wallet` | Password rules and the Terms checkbox; the recovery phrase is shown, a wrong tapping order is refused, the right one creates the wallet |
+| `import-wallet` | Pasting 12 words (hidden until Show), pasting 24 words switches to 24 boxes, a misspelled word is named by its number |
+| `receive` | The receive address stays the same until used, then moves on; Addresses shows Used / Unused |
+| `send` | The address step names a wrong network and catches a one-character typo; 50% → review sheet → transaction details → a wrong password is refused → sent; Max sends everything with no change and leaves 0 |
+| `speed-up` | Speed up an unconfirmed send: the node's mempool drops the original and holds exactly one replacement |
+| `accounts` | Rename an account; adding one refuses a wrong password and another wallet's phrase; Account 2 is added; balances show per account and switching works |
+
+If a test fails, Playwright saves a screenshot and a trace in `web/e2e-results/`
+(`npx playwright show-trace <trace.zip>` replays it step by step), and an HTML report in
+`web/e2e-report/`.
 
 `create`, `restore` and local `send` prompt for passwords at the terminal, so no automated test covers them. Section 2 does.
 

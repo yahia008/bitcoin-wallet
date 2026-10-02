@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# end-to-end tests (npm run e2e)
+/e2e-build/
+/e2e-server-data/
+/e2e-report/
+/e2e-results/

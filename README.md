@@ -152,10 +152,13 @@ CLI (your machine)                         API server (watch-only)          Core
 ## Tests
 
 ```bash
-cargo test                        # unit tests: encryption, descriptor checks, PSBT attack cases
+cargo test --workspace                   # unit tests: encryption, descriptor checks, PSBT attack cases
 docker compose up -d
-cargo test -- --ignored           # end-to-end: real server + regtest, full non-custodial send
+cargo test --test regtest -- --ignored   # end-to-end: real server + regtest, full non-custodial send
+cd web && npm run e2e                    # browser tests: a real browser clicks through the web wallet
 ```
+
+See [test.md](test.md) for what each test covers and the one-time browser setup.
 
 ## Project layout
 

@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
   // Write each page as <route>/index.html (e.g. terms/index.html), so any plain static file
   // server finds /terms/ without extra configuration.
   trailingSlash: true,
+  // The end-to-end tests build into their own folder (see e2e/), so they never overwrite the
+  // normal build in out/.
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
 };
 
 export default nextConfig;
