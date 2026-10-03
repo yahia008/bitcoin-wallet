@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Sends test coins to an address on the regtest node and mines a block to confirm them.
+# Sends test coins to one or more addresses on the regtest node and mines a block to confirm them.
 #
-#   ./fund <address> [btc]     default 1 BTC
-#   ./fund mine [blocks]       just mine, e.g. to confirm a send (default 1)
+#   ./fund <address> [btc]                 default 1 BTC
+#   ./fund <address> <address>... [btc]    the same amount to each, in one transaction
+#   ./fund mine [blocks]                   just mine, e.g. to confirm a send (default 1)
 #
 # Pays from a node wallet called "faucet", created and filled with mined coins on first use.
 # Needs the node running: docker compose up (or docker compose up -d bitcoind).
@@ -35,11 +36,35 @@ if [ "${1:-}" = "mine" ]; then
 fi
 
 if [ $# -lt 1 ]; then
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 
-txid=$(cli -rpcwallet=faucet sendtoaddress "$1" "${2:-1}")
+# A number at the end is the amount for each address; everything else is an address.
+addresses=("$@")
+amount=1
+if [[ "${addresses[-1]}" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+  amount=${addresses[-1]}
+  unset 'addresses[-1]'
+fi
+if [ ${#addresses[@]} -eq 0 ]; then
+  echo "No address given." >&2
+  exit 1
+fi
+
+if [ ${#addresses[@]} -eq 1 ]; then
+  txid=$(cli -rpcwallet=faucet sendtoaddress "${addresses[0]}" "$amount")
+else
+  # One transaction paying them all: sendmany "" '{"addr1":1,"addr2":1}'
+  outputs=""
+  for address in "${addresses[@]}"; do
+    outputs+="\"$address\":$amount,"
+  done
+  txid=$(cli -rpcwallet=faucet sendmany "" "{${outputs%,}}")
+fi
 mine 1
-echo "Sent ${2:-1} BTC to $1 and mined a block."
-echo "txid: $txid"
+
+for address in "${addresses[@]}"; do
+  echo "Sent $amount BTC to $address"
+done
+echo "Mined a block to confirm it. txid: $txid"

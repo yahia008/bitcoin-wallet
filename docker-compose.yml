@@ -1,5 +1,6 @@
 # `docker compose up` runs the whole wallet on regtest: the Bitcoin node, the API server and
 # the web wallet. Open http://localhost:3001, and fund a wallet with ./fund <address> [btc].
+# A miner service mines a block every 30 s (MINE_EVERY=10 docker compose up for faster).
 #
 # Only the node, for the tests or for running the server/site yourself:
 #   docker compose up -d bitcoind
@@ -29,6 +30,29 @@ services:
       interval: 2s
       timeout: 5s
       retries: 60
+
+  # Regtest has no miners of its own: this one mines a block every MINE_EVERY seconds (default
+  # 30), so sends from the wallet confirm by themselves. Pause it with `docker compose stop
+  # miner`, e.g. to show "Speed up" on a transaction that stays unconfirmed.
+  miner:
+    image: bitcoin/bitcoin:latest
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    environment:
+      MINE_EVERY: ${MINE_EVERY:-30}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cli() { bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=wallet -rpcpassword=wallet "$$@"; }
+        # The same "faucet" wallet ./fund pays from, so block rewards keep it topped up.
+        cli loadwallet faucet >/dev/null 2>&1 || cli createwallet faucet >/dev/null 2>&1 || true
+        echo "Mining a block every $${MINE_EVERY}s"
+        while true; do
+          sleep "$$MINE_EVERY"
+          cli -rpcwallet=faucet -generate 1 >/dev/null && echo "Mined block $$(cli getblockcount)"
+        done
+    restart: unless-stopped
 
   api:
     build:

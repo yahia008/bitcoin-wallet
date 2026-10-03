@@ -34,8 +34,14 @@ Receive screen's address:
 
 ```bash
 ./fund <address> 2       # sends 2 BTC and mines a block to confirm it
+./fund <addr1> <addr2> 1 # 1 BTC to each, in one transaction
 ./fund mine              # mines a block, e.g. to confirm something you sent
 ```
+
+A `miner` service mines a block every 30 seconds, so sends from the wallet confirm by
+themselves (`MINE_EVERY=10 docker compose up` for faster). To show "Speed up" on a transaction
+that stays unconfirmed, pause it with `docker compose stop miner` (`docker compose start miner`
+resumes).
 
 The first `docker compose up` compiles the Rust server and the WebAssembly, so it takes several
 minutes; later starts are quick. Stop with Ctrl+C (or `docker compose down`). Wallets on the API
