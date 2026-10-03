@@ -50,6 +50,29 @@ services:
       - api-data:/data
     restart: unless-stopped
 
+  # Opt-in: the same server on the public testnet4, syncing from mempool.space's Esplora.
+  # Needs internet access; the regtest demo above works without it.
+  #   docker compose --profile testnet4 up -d
+  api-testnet4:
+    profiles: [testnet4]
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    command:
+      - --network=testnet4
+      - --backend=esplora
+      - --esplora-url=https://mempool.space/testnet4/api
+      - --data-dir=/data
+      - --listen=0.0.0.0:3000
+      # Public Esplora rate-limits; don't re-sync on every request.
+      - --sync-interval-secs=30
+      - --cors-origins=http://localhost:3001,http://127.0.0.1:3001
+    ports:
+      - "127.0.0.1:3010:3000"
+    volumes:
+      - api-testnet4-data:/data
+    restart: unless-stopped
+
   web:
     build:
       context: .
@@ -62,3 +85,4 @@ services:
 volumes:
   bitcoin-data:
   api-data:
+  api-testnet4-data:
