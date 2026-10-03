@@ -69,7 +69,7 @@ What crosses each boundary:
 | From → to | What is sent | Never sent |
 |---|---|---|
 | Client → API | public descriptors (`tpub`), recipient + amount, signed PSBTs, API token | mnemonic, private keys, password |
-| API → client | addresses, balances, history, **unsigned** PSBTs, original tx for bumps | — |
+| API → client | addresses, balances, history (with times), transaction details (inputs/outputs), **unsigned** PSBTs, original tx for bumps | — |
 | API → chain | block/mempool queries, finalized transactions | — |
 
 ## Code layout
@@ -79,7 +79,8 @@ bitcoin-wallet/                 Cargo workspace
 ├── wallet-core/                Pure wallet logic, no I/O. Shared by CLI, server and browser.
 │   ├── keys.rs                 BIP39 mnemonic → account key m/84'/1'/n' → descriptors
 │   ├── crypto.rs               Argon2id + XChaCha20-Poly1305 encryption of the account key
-│   ├── review.rs               review / review_bump / check_fee: verify a server's PSBT
+│   ├── review.rs               review / review_bump / check_fee: verify a server's PSBT,
+│   │                           and report which of our change addresses get the change
 │   ├── sign.rs                 sign a PSBT with the account key
 │   └── ownership.rs            sign/verify a server challenge (API token recovery)
 ├── wallet-wasm/                Thin wasm-bindgen wrapper exposing wallet-core to JavaScript
@@ -88,13 +89,15 @@ bitcoin-wallet/                 Cargo workspace
 │   ├── bin/server.rs           Watch-only Axum API server
 │   ├── chain.rs                Chain backends: Bitcoin Core RPC or Esplora; sync
 │   ├── send.rs                 build → review → sign → finalize → broadcast
-│   ├── history.rs              transaction and address views
+│   ├── history.rs              transaction list (with times), one transaction's details
+│   │                           (inputs/outputs marked receive / change / external), addresses
 │   ├── secret.rs               encrypted account key storage in SQLite
 │   ├── api.rs / client.rs      JSON types and the CLI's HTTP client for the server
 │   └── lib.rs                  shared helpers (network parsing, wallet id, loading)
 ├── tests/regtest.rs            End-to-end: real server + regtest node, full send
 ├── web/                        Osok: Next.js + TypeScript + Tailwind, static export
-│   ├── src/app/                screens: setup, dashboard, send, speed-up, password card
+│   ├── src/app/                screens: setup, dashboard, send, transaction detail,
+│   │                           speed-up, password card
 │   ├── src/lib/                api.ts (server), wallet.ts (WASM), store.ts (IndexedDB),
 │   │                           accounts.ts (multi-account), format.ts (exact sat ↔ BTC)
 │   └── e2e/                    Playwright browser tests
@@ -167,6 +170,7 @@ sequenceDiagram
     S->>S: coin selection, change output,<br/>reserve coins for 10 min
     S-->>B: unsigned PSBT + summary
     B->>B: review(): recipient gets exactly the amount,<br/>every other output is our own change,<br/>input values checked against prev txs,<br/>fee guard (≤500 sat/vB, ≤10% when fee >10k sats)
+    B->>B: derive the change address(es) from our own<br/>internal descriptor and show them in the review
     B->>B: user confirms, enters password
     B->>B: decrypt account key and sign (inside WASM)
     B->>S: POST /broadcast {signed PSBT}
@@ -177,12 +181,54 @@ sequenceDiagram
 The server can lie about anything, and the client still won't sign a transaction that pays
 someone else, hides a large fee, or uses a non-`SIGHASH_ALL` signature.
 
+**Where the change goes.** A transaction usually has a change output: the part of the spent
+coins that comes back to us. The server picks the change address, so the client has to prove
+it's really ours. `review()` doesn't just check that the PSBT *claims* an output is change; it
+reads the derivation path the PSBT gives for that output, re-derives the script from our own
+internal (`/1/*`) descriptor at that index and requires an exact match. It returns those
+indexes (`Review.change_indexes`), and the browser turns each into an address with
+`addressAt(internal, index)`. The review sheet's "Transaction details" shows the recipient, the
+amount, the fee, the change amount and **"Change address #n"** with the full address. What the
+user sees there is therefore computed locally from their own keys, not copied from the server.
+
+```
+wallet-core review()  ──change_indexes──▶  wallet-wasm (SendReview / BumpReview)
+                                                  │ changeIndexes
+                                                  ▼
+                       web/src/lib/wallet.ts: addressAt(wallet.internal, i)
+                                                  │ changeAddresses [{index, address}]
+                                                  ▼
+                       Send review sheet / Speed up review: "Change address #n  tb1q…"
+```
+
 ### Speed up (RBF fee bump)
 
-The server builds a replacement transaction and also returns the **original** transaction. The
-client checks the original's txid matches the one it asked to bump, then `review_bump`
-verifies the replacement spends every original input, pays every original payment unchanged,
-sends the rest to its own change, and pays a higher fee.
+Speed up lives on the transaction detail screen (below) and only appears while the
+transaction is unconfirmed. The server builds a replacement transaction and also returns the
+**original** transaction. The client checks the original's txid matches the one it asked to
+bump, then `review_bump` verifies the replacement spends every original input, pays every
+original payment unchanged, sends the rest to its own change, and pays a higher fee. Like the
+send review, it shows the old and new fee, the change address(es) derived in the browser,
+and how many coins (inputs) it spends.
+
+### View a transaction (activity list and detail screen)
+
+The activity list shows each transaction's amount, status and **date**. Tapping one opens a
+detail screen backed by `GET /wallets/{id}/transactions/{txid}`:
+
+| Field | Meaning |
+|---|---|
+| `time` | Unix seconds: the block's time once confirmed, when the node first saw it in the mempool before that |
+| `confirmations`, `block_height` | how deep it is; both empty while unconfirmed |
+| `fee_sat`, `fee_rate_sat_vb`, `vsize` | fee and size; the fee only for transactions this wallet paid |
+| `rbf` | whether it signals replace-by-fee (BIP125), i.e. whether it can be sped up |
+| `inputs[]`, `outputs[]` | address, value and `owner`: `receive` or `change` (ours) or `external` |
+
+The server decides `owner` with BDK's `derivation_of_spk`: a script that matches one of our
+descriptors is ours (`/0/*` = receive, `/1/*` = change), anything else is external. This
+screen is **for information only**. It comes from the server and isn't re-verified, and that's
+safe because nothing on it gets signed. Anything the user acts on, such as Speed up, goes
+through the WASM review again.
 
 ### API token recovery
 
@@ -246,7 +292,8 @@ flowchart LR
 2. Clients **review every PSBT** (and every fee bump) before signing.
 3. A **high-fee guard** blocks fees that look like mistakes or attacks unless explicitly allowed.
 4. Every receive address from the server is **re-derived in the browser** and refused if it
-   differs.
+   differs. Change addresses in a PSBT are matched against our own descriptor too, and the
+   address the user sees in the review is derived in the browser.
 5. Keys are **encrypted at rest**, decrypted only to sign; in the browser this happens inside
    WASM, so the key never reaches JavaScript.
 6. The web wallet is a **static site**: there's no web server that could ever see a secret.
@@ -260,4 +307,13 @@ Known gaps: no TLS yet (keep the server on localhost), rate limits read the dire
 |---|---|---|
 | Unit | `cargo test --workspace` | encryption, descriptor checks, PSBT attack cases, rate limiter |
 | End-to-end | `cargo test --test regtest -- --ignored` | real server + regtest node, full non-custodial send |
-| Browser | `cd web && npm run e2e` | Playwright drives the real web wallet against a real server |
+| Browser | `cd web && npm run e2e` | Playwright drives the real web wallet against a real server: create/import, accounts, receive, send (incl. the change address shown in the review), Max, speed up from the detail screen |
+
+## Recent changes
+
+| Commit | Change | Why it matters |
+|---|---|---|
+| `0ce1e18` | Transaction detail screen: time, fee rate, size, RBF flag, inputs and outputs marked receive / change / external. Speed up moved from the list row onto this screen. | Users can see exactly where coins came from and went. Speed up sits next to the fee it changes. |
+| `3d5cce7` | Transactions carry a time (block time, or first seen in the mempool), shown as dates in the activity list. | History reads like a statement instead of a list of txids. |
+| `587ce88` | The PSBT review reports which of our change addresses get the change; the browser derives and shows them in the Send and Speed up reviews (Speed up also shows inputs). | Before signing, the user sees where *every* satoshi goes, including the part coming back, and those addresses come from their own keys rather than from the server. |
+
