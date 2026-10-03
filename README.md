@@ -212,4 +212,4 @@ architecture.md     how it all fits together, with diagrams
 - No mainnet yet: the coin type is fixed to `1'` (test networks) in `keys.rs`, and `--network mainnet` is refused.
 - The API has no TLS.
 - One API token per wallet: recovering it (by proving key ownership) signs out every other copy of that wallet on the server.
-- Coin reservations and rate-limit counts live in memory, so a server restart clears them.
+- Rate-limit counts live in memory, so a server restart clears them. (Coin reservations are saved in each wallet's SQLite file and survive a restart.)

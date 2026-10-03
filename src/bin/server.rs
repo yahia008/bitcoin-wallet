@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use axum::extract::rejection::JsonRejection;
@@ -103,28 +103,96 @@ struct WalletEntry {
 /// is spent once its transaction is broadcast, so without this two /psbt calls in a row would
 /// pick the same coins and the second broadcast would be rejected as a double-spend.
 ///
-/// Kept in memory only: after a restart the worst case is that old behavior, not lost funds.
-#[derive(Default)]
-struct Reservations(HashMap<OutPoint, Instant>);
+/// Saved in the wallet's own SQLite file (`coin_reservation`) as well as in memory, so a
+/// server restart between /psbt and /broadcast doesn't forget them. Every change is written
+/// to the table first, then to the map. Expiry times are unix seconds: an `Instant` only
+/// means something inside one process, so it can't be saved and read back.
+#[derive(Debug, Default)]
+struct Reservations(HashMap<OutPoint, u64>);
 
 impl Reservations {
-    /// Forgets reservations that expired by `now` and returns the coins still reserved.
-    fn active(&mut self, now: Instant) -> Vec<OutPoint> {
-        self.0.retain(|_, expires| *expires > now);
-        self.0.keys().copied().collect()
+    /// Creates the table if this wallet predates it, drops expired rows and loads the rest.
+    /// A loaded expiry is capped at `now + RESERVATION_TTL`, so a system clock that jumped
+    /// backwards can't keep coins reserved for longer than the TTL.
+    fn load(conn: &Connection, now: u64) -> anyhow::Result<Self> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS coin_reservation (
+                txid BLOB NOT NULL,
+                vout INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (txid, vout)
+            )",
+            [],
+        )?;
+        conn.execute("DELETE FROM coin_reservation WHERE expires_at <= ?1", [now])?;
+        let latest = now + RESERVATION_TTL.as_secs();
+        let mut stmt = conn.prepare("SELECT txid, vout, expires_at FROM coin_reservation")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?, row.get::<_, u64>(2)?))
+        })?;
+        let mut coins = HashMap::new();
+        for row in rows {
+            let (txid, vout, expires_at) = row?;
+            coins.insert(OutPoint::new(Txid::from_slice(&txid)?, vout), expires_at.min(latest));
+        }
+        Ok(Reservations(coins))
     }
 
-    fn reserve(&mut self, coins: impl IntoIterator<Item = OutPoint>, until: Instant) {
+    /// Forgets reservations that expired by `now` and returns the coins still reserved.
+    fn active(&mut self, conn: &Connection, now: u64) -> anyhow::Result<Vec<OutPoint>> {
+        if self.0.values().any(|expires| *expires <= now) {
+            conn.execute("DELETE FROM coin_reservation WHERE expires_at <= ?1", [now])?;
+            self.0.retain(|_, expires| *expires > now);
+        }
+        Ok(self.0.keys().copied().collect())
+    }
+
+    fn reserve(
+        &mut self,
+        conn: &Connection,
+        coins: impl IntoIterator<Item = OutPoint>,
+        until: u64,
+    ) -> anyhow::Result<()> {
+        let coins: Vec<OutPoint> = coins.into_iter().collect();
+        let tx = conn.unchecked_transaction()?;
+        for coin in &coins {
+            tx.execute(
+                "INSERT OR REPLACE INTO coin_reservation (txid, vout, expires_at)
+                 VALUES (?1, ?2, ?3)",
+                params![coin.txid.as_byte_array(), coin.vout, until],
+            )?;
+        }
+        tx.commit()?;
         for coin in coins {
             self.0.insert(coin, until);
         }
+        Ok(())
     }
 
-    fn release(&mut self, coins: impl IntoIterator<Item = OutPoint>) {
-        for coin in coins {
-            self.0.remove(&coin);
+    fn release(
+        &mut self,
+        conn: &Connection,
+        coins: impl IntoIterator<Item = OutPoint>,
+    ) -> anyhow::Result<()> {
+        let coins: Vec<OutPoint> = coins.into_iter().collect();
+        let tx = conn.unchecked_transaction()?;
+        for coin in &coins {
+            tx.execute(
+                "DELETE FROM coin_reservation WHERE txid = ?1 AND vout = ?2",
+                params![coin.txid.as_byte_array(), coin.vout],
+            )?;
         }
+        tx.commit()?;
+        for coin in &coins {
+            self.0.remove(coin);
+        }
+        Ok(())
     }
+}
+
+/// Wall-clock time in unix seconds, for reservation expiry.
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Counts requests per client IP in fixed time windows: at most `limit` requests per `window`,
@@ -654,11 +722,12 @@ async fn build_psbt(
     let (draft, fee_rate) = with_wallet(state, id, token, move |w, backend| {
         let fee_rate = send::choose_fee_rate(backend, req.fee_rate_sat_vb, req.fee_priority)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let now = Instant::now();
-        let reserved = w.reserved.active(now);
+        let now = unix_now();
+        let reserved = w.reserved.active(&w.conn, now)?;
         let draft = send::build(&mut w.wallet, &to, amount, fee_rate, &reserved)
             .map_err(|e| build_error(e, &reserved))?;
-        w.reserved.reserve(spent_coins(&draft.psbt.unsigned_tx), now + RESERVATION_TTL);
+        let until = now + RESERVATION_TTL.as_secs();
+        w.reserved.reserve(&w.conn, spent_coins(&draft.psbt.unsigned_tx), until)?;
         Ok((draft, fee_rate))
     })
     .await?;
@@ -703,12 +772,13 @@ async fn bump_fee(
             .ok_or_else(|| ApiError::bad_request("transaction not found in this wallet"))?
             .tx_node
             .tx;
-        let now = Instant::now();
-        let reserved = w.reserved.active(now);
+        let now = unix_now();
+        let reserved = w.reserved.active(&w.conn, now)?;
         let draft = send::bump(&mut w.wallet, txid, fee_rate, &reserved)
             .map_err(|e| build_error(e, &reserved))?;
         // Only coins the bump added need reserving; the original's are already spent.
-        w.reserved.reserve(spent_coins(&draft.psbt.unsigned_tx), now + RESERVATION_TTL);
+        let until = now + RESERVATION_TTL.as_secs();
+        w.reserved.reserve(&w.conn, spent_coins(&draft.psbt.unsigned_tx), until)?;
         Ok((draft, fee_rate, original))
     })
     .await?;
@@ -765,8 +835,12 @@ async fn broadcast(
                 _ => e.into(),
             }
         })?;
-        // BDK now sees these coins as spent, so the reservation has done its job.
-        reserved.release(spent);
+        // BDK now sees these coins as spent, so the reservation has done its job. The
+        // transaction is already out, so a failure here mustn't fail the request: a leftover
+        // row only keeps already-spent coins "reserved" until it expires.
+        if let Err(e) = reserved.release(conn, spent) {
+            eprintln!("warning: couldn't release reserved coins for {txid}: {e:#}");
+        }
         Ok(txid)
     })
     .await?;
@@ -806,7 +880,7 @@ impl AppState {
                     "wallet has no API token; delete it from the server's data dir and register again",
                 )
             })?;
-        let reserved = Reservations::default();
+        let reserved = Reservations::load(&conn, unix_now())?;
         let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, token_hash, last_sync: None }));
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
@@ -983,21 +1057,77 @@ mod tests {
         OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), vout)
     }
 
+    const TTL: u64 = RESERVATION_TTL.as_secs();
+
+    fn db() -> Connection {
+        Connection::open_in_memory().unwrap()
+    }
+
     #[test]
     fn reservations_expire() {
-        let now = Instant::now();
-        let mut r = Reservations::default();
-        r.reserve([coin(0)], now + RESERVATION_TTL);
-        assert_eq!(r.active(now), vec![coin(0)]);
-        assert!(r.active(now + RESERVATION_TTL).is_empty());
+        let conn = db();
+        let now = 1_000_000;
+        let mut r = Reservations::load(&conn, now).unwrap();
+        r.reserve(&conn, [coin(0)], now + TTL).unwrap();
+        assert_eq!(r.active(&conn, now).unwrap(), vec![coin(0)]);
+        assert!(r.active(&conn, now + TTL).unwrap().is_empty());
+        // ...and gone from the table too.
+        assert!(Reservations::load(&conn, now).unwrap().0.is_empty());
     }
 
     #[test]
     fn release_frees_only_the_given_coins() {
-        let now = Instant::now();
-        let mut r = Reservations::default();
-        r.reserve([coin(0), coin(1)], now + RESERVATION_TTL);
-        r.release([coin(0)]);
-        assert_eq!(r.active(now), vec![coin(1)]);
+        let conn = db();
+        let now = 1_000_000;
+        let mut r = Reservations::load(&conn, now).unwrap();
+        r.reserve(&conn, [coin(0), coin(1)], now + TTL).unwrap();
+        r.release(&conn, [coin(0)]).unwrap();
+        assert_eq!(r.active(&conn, now).unwrap(), vec![coin(1)]);
+        assert_eq!(Reservations::load(&conn, now).unwrap().0.into_keys().collect::<Vec<_>>(), vec![coin(1)]);
+    }
+
+    #[test]
+    fn reservations_survive_a_reload() {
+        // A server restart is a fresh `load` from the same file.
+        let conn = db();
+        let now = 1_000_000;
+        let mut r = Reservations::load(&conn, now).unwrap();
+        r.reserve(&conn, [coin(0), coin(1)], now + TTL).unwrap();
+        drop(r);
+
+        let mut reloaded = Reservations::load(&conn, now + 60).unwrap();
+        let mut coins = reloaded.active(&conn, now + 60).unwrap();
+        coins.sort();
+        assert_eq!(coins, vec![coin(0), coin(1)]);
+        assert_eq!(reloaded.0[&coin(0)], now + TTL, "keeps its original expiry");
+    }
+
+    #[test]
+    fn expired_reservations_are_not_loaded() {
+        let conn = db();
+        let now = 1_000_000;
+        let mut r = Reservations::load(&conn, now).unwrap();
+        r.reserve(&conn, [coin(0)], now + TTL).unwrap();
+        r.reserve(&conn, [coin(1)], now + 2 * TTL).unwrap();
+
+        let reloaded = Reservations::load(&conn, now + TTL).unwrap();
+        assert_eq!(reloaded.0.into_keys().collect::<Vec<_>>(), vec![coin(1)]);
+        let rows: u32 = conn
+            .query_row("SELECT COUNT(*) FROM coin_reservation", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the expired row was deleted");
+    }
+
+    #[test]
+    fn clock_jumping_back_caps_loaded_expiry() {
+        let conn = db();
+        let now = 1_000_000;
+        let mut r = Reservations::load(&conn, now).unwrap();
+        r.reserve(&conn, [coin(0)], now + TTL).unwrap();
+
+        // The clock went back an hour: the row now looks 70 minutes away from expiring.
+        let earlier = now - 3600;
+        let reloaded = Reservations::load(&conn, earlier).unwrap();
+        assert_eq!(reloaded.0[&coin(0)], earlier + TTL, "never more than the TTL from now");
     }
 }

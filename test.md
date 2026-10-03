@@ -23,13 +23,14 @@ cd web && npm run e2e                        # 10 browser tests of the web walle
 | `secret::tests::*` | The secret is encrypted, a wrong password is rejected, the plaintext is never stored, and `replace` overwrites it |
 | `keys::tests::*` | The account key carries its origin, matches the BIP84 test vector, and gives the same descriptors as the old mnemonic derivation |
 | `send::tests::*` | `review` accepts an honest PSBT and rejects tampered ones: a changed amount, redirected change, an extra output, a weak sighash, a faked input value, a missing previous transaction |
-| `server` tests | The server accepts public descriptors and rejects private ones and garbage; API tokens are random and stored hashed; coin reservations expire and release; the rate limiter blocks per IP until the window ends |
+| `server` tests | The server accepts public descriptors and rejects private ones and garbage; API tokens are random and stored hashed; coin reservations expire, release, survive a reload from SQLite, drop expired rows and cap a loaded expiry if the clock jumped back; the rate limiter blocks per IP until the window ends |
 | `client::tests::*` | The CLI saves and finds each server's API token |
 | `chain::tests::*` | The birthday is saved and read back, and wallets without one scan from genesis |
 | `birthday_skips_earlier_blocks` (`tests/regtest.rs`) | Registered with a birthday after its funding block, a wallet shows 0; with the right birthday it finds the coin. A birthday past the tip is `400` |
 | `registration_is_rate_limited` (`tests/regtest.rs`) | With a limit of 2 registrations per hour, the 3rd gets `429` with a `Retry-After` header |
 | `lost_token_is_recovered_by_proving_key_ownership` (`tests/regtest.rs`) | A forged signature is refused, the owner's signature gets a new token, a challenge can't be reused, and the old token stops working |
 | `non_custodial_send_flow` (`tests/regtest.rs`) | The full API flow on a live node: register, token auth (missing, wrong, other wallet's, re-register), fund, build the PSBT, review, sign, broadcast, confirm, coin reservations |
+| `coin_reservations_survive_a_server_restart` (`tests/regtest.rs`) | A wallet with one coin builds a PSBT, the server restarts on the same data dir, and a second PSBT is refused because the coin is still reserved |
 
 Every test should report `ok`.
 

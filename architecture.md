@@ -47,7 +47,7 @@ flowchart LR
     subgraph Server["API server (watch-only, no private keys)"]
         AXUM["Axum HTTP API<br/>auth, rate limits, CORS"]
         BDK["BDK wallets<br/>coin selection, PSBT building,<br/>coin reservations"]
-        SQL2[("data-dir/&lt;id&gt;.sqlite<br/>public descriptors,<br/>token hash")]
+        SQL2[("data-dir/&lt;id&gt;.sqlite<br/>public descriptors,<br/>token hash, coin reservations")]
         AXUM <--> BDK <--> SQL2
     end
 
@@ -137,7 +137,7 @@ drift from the CLI's.
 |---|---|
 | CLI `wallet.sqlite` | encrypted account key + BDK wallet state |
 | Browser IndexedDB (`wallet:<network>`) | encrypted account key, descriptors, API token, account list |
-| Server `data-dir/<id>.sqlite` | public descriptors, BDK state, SHA-256 of the API token |
+| Server `data-dir/<id>.sqlite` | public descriptors, BDK state, SHA-256 of the API token, coin reservations |
 
 ## Main flows
 
@@ -245,7 +245,10 @@ the registered descriptor before issuing a new token (`/token`) and revoking the
 - **Wallet ids** must be exactly 16 hex chars (they become file names, so this blocks path
   traversal).
 - **Coin reservations**: coins used in a handed-out PSBT are reserved for 10 minutes so two
-  sends in a row don't pick the same coins. In memory only.
+  sends in a row don't pick the same coins. They're saved in the wallet's SQLite file
+  (`coin_reservation`: outpoint + expiry in unix seconds) and loaded back when the wallet is
+  opened, so a restart between `/psbt` and `/broadcast` doesn't free them. A loaded expiry
+  is capped at 10 minutes from now, in case the system clock jumped backwards.
 - **Sync throttling**: `--sync-interval-secs` (default 30) avoids re-syncing on every request
   and keeps public Esplora rate limits happy.
 - **Rate limits** per IP: 60 requests/minute overall, 5 registrations/hour.
@@ -299,7 +302,7 @@ flowchart LR
 6. The web wallet is a **static site**: there's no web server that could ever see a secret.
 
 Known gaps: no TLS yet (keep the server on localhost), rate limits read the direct IP (not
-`X-Forwarded-For`), and coin reservations are lost on restart.
+`X-Forwarded-For`), and rate-limit counts are lost on restart.
 
 ## Testing
 
@@ -316,4 +319,4 @@ Known gaps: no TLS yet (keep the server on localhost), rate limits read the dire
 | `0ce1e18` | Transaction detail screen: time, fee rate, size, RBF flag, inputs and outputs marked receive / change / external. Speed up moved from the list row onto this screen. | Users can see exactly where coins came from and went. Speed up sits next to the fee it changes. |
 | `3d5cce7` | Transactions carry a time (block time, or first seen in the mempool), shown as dates in the activity list. | History reads like a statement instead of a list of txids. |
 | `587ce88` | The PSBT review reports which of our change addresses get the change; the browser derives and shows them in the Send and Speed up reviews (Speed up also shows inputs). | Before signing, the user sees where *every* satoshi goes, including the part coming back, and those addresses come from their own keys rather than from the server. |
-
+| *(this commit)* | Coin reservations are saved in each wallet's SQLite file instead of only in memory. | A server restart between building a PSBT and broadcasting it no longer lets a second PSBT reuse the same coins (which would have been a double-spend). |

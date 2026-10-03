@@ -5,7 +5,7 @@
 //!     cargo test -- --ignored
 
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -267,6 +267,44 @@ fn lost_token_is_recovered_by_proving_key_ownership() {
     assert_eq!(http("GET", &balance_url, &new_token)["total_sat"], 0);
 }
 
+#[test]
+#[ignore = "needs the regtest node: docker compose up -d bitcoind"]
+fn coin_reservations_survive_a_server_restart() {
+    let funder = funder_wallet();
+    let wallet = random_wallet();
+    let mut server = Server::start();
+    let request = RegisterRequest {
+        external: wallet.public_descriptor(KeychainKind::External).to_string(),
+        internal: wallet.public_descriptor(KeychainKind::Internal).to_string(),
+        birthday: 0,
+    };
+    let registered = ApiClient::new(&server.url).register(&request).unwrap();
+    let id = registered.id;
+
+    // Exactly one coin, so a second PSBT can only be built by reusing it.
+    let address = wallet.peek_address(KeychainKind::External, 0).address;
+    funder.send_to_address(&address, Amount::ONE_BTC, None, None, None, None, None, None).unwrap();
+    mine(&funder, 1);
+
+    let dest = funder.get_new_address(None, None).unwrap().assume_checked();
+    let psbt_request = PsbtRequest {
+        address: dest.to_string(),
+        amount_sat: 30_000_000,
+        fee_rate_sat_vb: Some(2),
+        fee_priority: Default::default(),
+        send_all: false,
+    };
+    let api = |url: &str| ApiClient::new(url).with_token(&registered.token);
+    api(&server.url).build_psbt(&id, &psbt_request).unwrap();
+
+    // The server restarts before that PSBT is broadcast. The reservation was saved in the
+    // wallet's SQLite file, so the coin is still taken (before, it was forgotten here and
+    // the second PSBT would reuse it: a double-spend of the first).
+    server.restart();
+    let err = api(&server.url).build_psbt(&id, &psbt_request).err().expect("the coin is reserved");
+    assert!(format!("{err:#}").contains("reserved"), "unexpected error: {err:#}");
+}
+
 /// A Core wallet with spendable coins to fund the test wallet from.
 fn funder_wallet() -> Client {
     let auth = || Auth::UserPass("wallet".into(), "wallet".into());
@@ -364,6 +402,8 @@ struct Server {
     url: String,
     child: Child,
     data_dir: PathBuf,
+    port: u16,
+    args: Vec<String>,
 }
 
 impl Server {
@@ -374,24 +414,37 @@ impl Server {
     fn start_with(extra_args: &[&str]) -> Self {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let data_dir = std::env::temp_dir().join(format!("bitcoin-wallet-itest-{port}"));
+        let args: Vec<String> = extra_args.iter().map(|a| a.to_string()).collect();
+        let child = Self::spawn(port, &data_dir, &args);
+        Server { url: format!("http://127.0.0.1:{port}"), child, data_dir, port, args }
+    }
+
+    /// Stops the server and starts it again on the same port and data directory: everything
+    /// it kept only in memory is gone, what it saved to disk isn't.
+    fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child = Self::spawn(self.port, &self.data_dir, &self.args);
+    }
+
+    /// Starts the binary and waits until it answers /health.
+    fn spawn(port: u16, data_dir: &Path, args: &[String]) -> Child {
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
             .arg("--data-dir")
-            .arg(&data_dir)
+            .arg(data_dir)
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
             // The tests mine blocks and expect the very next request to see them.
             .args(["--sync-interval-secs", "0"])
-            .args(extra_args)
+            .args(args)
             .spawn()
             .unwrap();
-        let server = Server { url: format!("http://127.0.0.1:{port}"), child, data_dir };
-
         let deadline = Instant::now() + Duration::from_secs(10);
-        while ureq::get(&format!("{}/health", server.url)).call().is_err() {
+        while ureq::get(&format!("http://127.0.0.1:{port}/health")).call().is_err() {
             assert!(Instant::now() < deadline, "server didn't start");
             std::thread::sleep(Duration::from_millis(100));
         }
-        server
+        child
     }
 }
 
