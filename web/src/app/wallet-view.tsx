@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 
 import {
+  ApiError,
   getAddresses,
   getBalance,
   getTransactions,
@@ -15,7 +16,7 @@ import {
 import { explorerAddressUrl, formatBtcShort, formatTxTime } from "@/lib/format";
 import { setUpAccount } from "@/lib/accounts";
 import { forgetAccounts, saveAccount, type StoredWallet } from "@/lib/store";
-import { checkPassword, verifyReceiveAddress } from "@/lib/wallet";
+import { checkPassword, recoverApiToken, verifyReceiveAddress } from "@/lib/wallet";
 
 import {
   ArrowDownIcon,
@@ -58,6 +59,7 @@ type View =
   | "wallets"
   | "add-wallet"
   | "add-account"
+  | "sign-in"
   | "tx";
 
 /** The loaded wallet, as a dashboard: balance and actions up top, activity below; Receive,
@@ -81,6 +83,9 @@ export function WalletView({
   const [data, setData] = useState<Loaded>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  // The server rejected this account's API token: another copy of the wallet (another
+  // browser, or a restore) recovered a new one, which signs this copy out.
+  const [signedOut, setSignedOut] = useState(false);
   // Bumped by Refresh (and after sending) to fetch again.
   const [version, setVersion] = useState(0);
   // The transaction shown on the "tx" screen.
@@ -90,8 +95,12 @@ export function WalletView({
     let current = true; // ignore answers that arrive after a newer request or unmount
     fetchOverview(wallet)
       .then(
-        (loaded) => current && (setData(loaded), setError(undefined)),
-        (e) => current && setError(message(e)),
+        (loaded) => current && (setData(loaded), setError(undefined), setSignedOut(false)),
+        (e) => {
+          if (!current) return;
+          setError(message(e));
+          setSignedOut(e instanceof ApiError && e.status === 401);
+        },
       )
       .finally(() => current && setLoading(false));
     return () => {
@@ -180,6 +189,22 @@ export function WalletView({
     );
   }
 
+  if (view === "sign-in") {
+    return (
+      <Screen title="Sign in again" onBack={home}>
+        <SignInAgain
+          wallet={wallet}
+          // Stored with the new token: reloading the accounts reloads the dashboard.
+          onSignedIn={() => {
+            home();
+            onAccountsChanged();
+          }}
+          onBack={home}
+        />
+      </Screen>
+    );
+  }
+
   const balance = data?.balance;
   return (
     <div className="flex flex-col">
@@ -199,7 +224,15 @@ export function WalletView({
           <span className="ml-2 text-xl text-zinc-400">BTC</span>
         </p>
         <p className="mt-2 h-5 text-sm text-zinc-500 tabular-nums">
-          {error ? (
+          {signedOut ? (
+            <button
+              type="button"
+              onClick={() => setView("sign-in")}
+              className="text-violet-300 hover:text-violet-200"
+            >
+              Signed out on this device · Sign in again
+            </button>
+          ) : error ? (
             <span className="text-red-500">{error}</span>
           ) : balance && balance.unconfirmed_sat !== 0 ? (
             `${formatBtcShort(balance.unconfirmed_sat)} BTC unconfirmed`
@@ -808,6 +841,54 @@ function AddAccount({
         error={error}
         onImport={add}
         onBack={onBack}
+      />
+    </div>
+  );
+}
+
+/** Gets this account a new API token after another copy of the wallet took over the old
+ * one: signs the server's challenge with the account key, decrypted with the password. */
+function SignInAgain({
+  wallet,
+  onSignedIn,
+  onBack,
+}: {
+  wallet: StoredWallet;
+  onSignedIn: () => void;
+  onBack: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function signIn(password: string) {
+    setBusy(true);
+    setError(undefined);
+    try {
+      // Checked first, so a typo doesn't use up a server challenge.
+      try {
+        await checkPassword(wallet, password);
+      } catch {
+        throw new Error("That's not your wallet password.");
+      }
+      const apiToken = await recoverApiToken(wallet, password);
+      await saveAccount({ ...wallet, apiToken });
+      onSignedIn();
+    } catch (e) {
+      setError(message(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="pt-8">
+      <PasswordCard
+        subtitle="This wallet was opened somewhere else, which signed this device out. Enter your password to sign back in (that will sign the other one out)."
+        actionLabel="Sign in"
+        busyLabel="Signing in…"
+        busy={busy}
+        error={error}
+        onSubmit={signIn}
+        onCancel={onBack}
       />
     </div>
   );
