@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import { broadcast, bumpFee } from "@/lib/api";
 import { formatBtc } from "@/lib/format";
@@ -113,6 +113,14 @@ export function SpeedUp({
         </dd>
         <dt className="text-zinc-500">Change</dt>
         <dd>{formatBtc(review.changeSat)} BTC</dd>
+        {review.changeAddresses.map((c) => (
+          <Fragment key={c.index}>
+            <dt className="text-zinc-500">Change #{c.index}</dt>
+            <dd className="break-all font-mono">{c.address}</dd>
+          </Fragment>
+        ))}
+        <dt className="text-zinc-500">Inputs</dt>
+        <dd>{review.inputs}</dd>
       </dl>
       {review.feeWarning && (
         <label className="mb-3 flex items-start gap-2 text-xs text-red-700 dark:text-red-400">

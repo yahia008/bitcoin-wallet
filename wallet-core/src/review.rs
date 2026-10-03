@@ -57,6 +57,9 @@ pub fn check_fee(tx: &Transaction, amount: Amount, fee: Amount) -> anyhow::Resul
 pub struct Review {
     pub fee: Amount,
     pub change: Amount,
+    /// Which of our change addresses (internal keychain indexes) the change goes to, each
+    /// derived from our own descriptor and matched against the PSBT.
+    pub change_indexes: Vec<u32>,
     pub inputs: usize,
 }
 
@@ -69,8 +72,13 @@ pub struct Review {
 pub fn review(wallet: &Wallet, psbt: &Psbt, to: &Address, amount: Amount) -> anyhow::Result<Review> {
     let payment = TxOut { value: amount, script_pubkey: to.script_pubkey() };
     let inputs = verified_inputs(psbt)?;
-    let change = check_outputs(wallet, psbt, &[payment])?;
-    Ok(Review { fee: fee_of(&psbt.unsigned_tx, &inputs)?, change, inputs: inputs.len() })
+    let (change, change_indexes) = check_outputs(wallet, psbt, &[payment])?;
+    Ok(Review {
+        fee: fee_of(&psbt.unsigned_tx, &inputs)?,
+        change,
+        change_indexes,
+        inputs: inputs.len(),
+    })
 }
 
 /// Checks a fee bump (RBF replacement) of `original` that someone else built. Besides the
@@ -107,14 +115,14 @@ pub fn review_bump(
         })
         .cloned()
         .collect();
-    let change = check_outputs(wallet, psbt, &payments)?;
+    let (change, change_indexes) = check_outputs(wallet, psbt, &payments)?;
 
     let fee = fee_of(&psbt.unsigned_tx, &inputs)?;
     let old_fee = fee_of(original, &inputs)?;
     if fee <= old_fee {
         bail!("the replacement's fee {fee} isn't higher than the original's {old_fee}");
     }
-    Ok((Review { fee, change, inputs: inputs.len() }, old_fee))
+    Ok((Review { fee, change, change_indexes, inputs: inputs.len() }, old_fee))
 }
 
 /// The value of every coin the PSBT spends, checked against the previous transactions.
@@ -155,11 +163,16 @@ fn verified_inputs(psbt: &Psbt) -> anyhow::Result<HashMap<OutPoint, Amount>> {
 }
 
 /// Requires the PSBT to pay each of `payments` exactly, with every other output going to our
-/// own change. Returns the change total.
-fn check_outputs(wallet: &Wallet, psbt: &Psbt, payments: &[TxOut]) -> anyhow::Result<Amount> {
+/// own change. Returns the change total and the change addresses' indexes.
+fn check_outputs(
+    wallet: &Wallet,
+    psbt: &Psbt,
+    payments: &[TxOut],
+) -> anyhow::Result<(Amount, Vec<u32>)> {
     let mut unpaid: Vec<&TxOut> = payments.iter().collect();
     let change_descriptor = wallet.public_descriptor(KeychainKind::Internal);
     let mut change = Amount::ZERO;
+    let mut change_indexes = Vec::new();
     for (i, (txout, output)) in psbt.unsigned_tx.output.iter().zip(&psbt.outputs).enumerate() {
         if let Some(pos) = unpaid.iter().position(|p| p.script_pubkey == txout.script_pubkey) {
             let payment = unpaid.remove(pos);
@@ -187,11 +200,12 @@ fn check_outputs(wallet: &Wallet, psbt: &Psbt, payments: &[TxOut]) -> anyhow::Re
             bail!("output {i} claims to be change but doesn't pay your change address");
         }
         change += txout.value;
+        change_indexes.push(index);
     }
     if let Some(missing) = unpaid.first() {
         bail!("PSBT is missing the payment of {} to {}", missing.value, missing.script_pubkey);
     }
-    Ok(change)
+    Ok((change, change_indexes))
 }
 
 /// Inputs minus outputs, with input values from `values` (already verified).

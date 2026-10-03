@@ -34,6 +34,9 @@ test("send half: review sheet, wrong password refused, then sent", async ({ page
   await expect(page.getByText("You are sending")).toBeVisible();
   await page.getByRole("button", { name: "Transaction details" }).click();
   await expect(page.getByText("Verified in this browser")).toBeVisible();
+  // A fresh wallet's first change goes to its change address #0, derived in the browser.
+  await expect(page.getByText("Change address #0")).toBeVisible();
+  await expect(page.locator("dd", { hasText: /^bcrt1/ }).last()).toBeVisible();
 
   await page.getByRole("button", { name: /^Send to / }).click();
   await page.getByLabel("Wallet password").fill("not my password");

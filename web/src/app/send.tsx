@@ -597,6 +597,12 @@ function ReviewStep({
                     <dt className="text-zinc-500">Change</dt>
                     <dd>{formatBtc(review.changeSat)} BTC</dd>
                   </div>
+                  {review.changeAddresses.map((c) => (
+                    <div key={c.index}>
+                      <dt className="text-zinc-500">Change address #{c.index}</dt>
+                      <dd className="break-all font-mono">{c.address}</dd>
+                    </div>
+                  ))}
                   <div className="flex justify-between">
                     <dt className="text-zinc-500">Total out</dt>
                     <dd className="font-semibold">

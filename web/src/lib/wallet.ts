@@ -62,12 +62,30 @@ export async function verifyReceiveAddress(
 export type SendReview = {
   feeSat: number;
   changeSat: number;
+  /** Our change addresses the change goes to, derived here from the internal descriptor at
+   * the indexes the review matched; empty when there's no change. */
+  changeAddresses: ChangeAddress[];
   inputs: number;
   /** sat/vB once signed (a lower bound). */
   feeRate: number;
   /** Set when the fee looks like a mistake; the user must confirm it explicitly. */
   feeWarning?: string;
 };
+
+/** One of our change (internal keychain) addresses. */
+export type ChangeAddress = { index: number; address: string };
+
+/** Derives our change address at each of `indexes` from the wallet's internal descriptor. */
+function changeAddresses(
+  w: typeof wasm,
+  wallet: WalletKeys,
+  indexes: number[],
+): ChangeAddress[] {
+  return indexes.map((index) => ({
+    index,
+    address: w.addressAt(wallet.internal, index, wallet.network),
+  }));
+}
 
 type WalletKeys = { network: string; external: string; internal: string; encryptedKey: unknown };
 
@@ -79,7 +97,9 @@ export async function reviewSend(
   to: string,
   amountSat: number,
 ): Promise<SendReview> {
-  return (await loadWallet()).reviewSend(wallet, psbt, to, BigInt(amountSat));
+  const w = await loadWallet();
+  const { changeIndexes, ...review } = w.reviewSend(wallet, psbt, to, BigInt(amountSat));
+  return { ...review, changeAddresses: changeAddresses(w, wallet, changeIndexes) };
 }
 
 /** Decrypts the account key with `password` inside WASM and signs `psbt`. The key never
@@ -100,6 +120,9 @@ export type BumpReview = {
   feeSat: number;
   feeRate: number;
   changeSat: number;
+  /** As in `SendReview`. */
+  changeAddresses: ChangeAddress[];
+  inputs: number;
   feeWarning?: string;
 };
 
@@ -112,7 +135,9 @@ export async function reviewBump(
   originalTx: string,
   txid: string,
 ): Promise<BumpReview> {
-  return (await loadWallet()).reviewBump(wallet, psbt, originalTx, txid);
+  const w = await loadWallet();
+  const { changeIndexes, ...review } = w.reviewBump(wallet, psbt, originalTx, txid);
+  return { ...review, changeAddresses: changeAddresses(w, wallet, changeIndexes) };
 }
 
 /** Gets a new API token for an already-registered wallet by proving we hold its key: the

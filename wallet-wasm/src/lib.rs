@@ -136,6 +136,10 @@ pub fn check_address(address: &str, network: &str) -> Result<(), JsError> {
 pub struct SendReview {
     fee_sat: u64,
     change_sat: u64,
+    /// Our change addresses the change goes to (internal indexes), checked against our
+    /// own descriptor; empty when there's no change.
+    change_indexes: Vec<u32>,
+    /// How many coins it spends, each value checked against its previous transaction.
     inputs: usize,
     /// Fee rate once signed, sat/vB (a lower bound; see `signed_fee_rate`).
     fee_rate: f64,
@@ -171,6 +175,7 @@ pub fn review_send(
     let summary = SendReview {
         fee_sat: review.fee.to_sat(),
         change_sat: review.change.to_sat(),
+        change_indexes: review.change_indexes,
         inputs: review.inputs,
         fee_rate: review::signed_fee_rate(&psbt.unsigned_tx, review.fee),
         fee_warning,
@@ -190,6 +195,10 @@ pub struct BumpReview {
     fee_sat: u64,
     fee_rate: f64,
     change_sat: u64,
+    /// As in `SendReview`.
+    change_indexes: Vec<u32>,
+    /// How many coins it spends: all of the original's, values checked.
+    inputs: usize,
     fee_warning: Option<String>,
 }
 
@@ -231,6 +240,8 @@ pub fn review_bump(
         fee_sat: review.fee.to_sat(),
         fee_rate: review::signed_fee_rate(&psbt.unsigned_tx, review.fee),
         change_sat: review.change.to_sat(),
+        change_indexes: review.change_indexes,
+        inputs: review.inputs,
         fee_warning,
     };
     Ok(serde_wasm_bindgen::to_value(&summary)?)
