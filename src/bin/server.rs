@@ -80,6 +80,12 @@ struct Args {
     /// Registrations per hour allowed from one IP. Each one creates a database file.
     #[arg(long, env = "REGISTER_LIMIT_PER_HOUR", default_value_t = 5)]
     register_limit_per_hour: u32,
+
+    /// Rate-limit by the `X-Real-IP` header instead of the connecting IP. Only set this when
+    /// the server is reachable solely through a reverse proxy that sets the header (the docker
+    /// compose nginx does); otherwise any client could pick its own IP.
+    #[arg(long, env = "TRUST_X_REAL_IP")]
+    trust_x_real_ip: bool,
 }
 
 /// How long a token-recovery challenge can be answered.
@@ -198,11 +204,12 @@ fn unix_now() -> u64 {
 /// Counts requests per client IP in fixed time windows: at most `limit` requests per `window`,
 /// then 429 until the window ends. Kept in memory; a restart just resets the counts.
 ///
-/// Behind a reverse proxy every request would come from the proxy's IP, so this would need
-/// to read `X-Forwarded-For` instead. The server only listens on localhost for now.
+/// Behind a reverse proxy every request comes from the proxy's IP, so with `trust_x_real_ip`
+/// the client's IP is taken from the `X-Real-IP` header the proxy sets.
 struct RateLimiter {
     limit: u32,
     window: Duration,
+    trust_x_real_ip: bool,
     /// Per IP: when its current window started, and requests made in it.
     clients: Mutex<HashMap<IpAddr, (Instant, u32)>>,
 }
@@ -211,8 +218,17 @@ impl RateLimiter {
     /// Above this many tracked IPs, forget the ones whose window already ended.
     const PRUNE_AT: usize = 10_000;
 
-    fn new(limit: u32, window: Duration) -> Self {
-        RateLimiter { limit, window, clients: Mutex::new(HashMap::new()) }
+    fn new(limit: u32, window: Duration, trust_x_real_ip: bool) -> Self {
+        RateLimiter { limit, window, trust_x_real_ip, clients: Mutex::new(HashMap::new()) }
+    }
+
+    /// The IP a request counts against: `X-Real-IP` if trusted and valid, else the peer's.
+    fn client_ip(&self, peer: IpAddr, request: &Request) -> IpAddr {
+        let header = self.trust_x_real_ip.then(|| request.headers().get("x-real-ip")).flatten();
+        header
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(peer)
     }
 
     /// Counts one request from `ip`. `Err` holds how long until it may try again.
@@ -242,7 +258,8 @@ async fn rate_limit(
     request: Request,
     next: Next,
 ) -> Response {
-    match limiter.check(client.ip(), Instant::now()) {
+    let ip = limiter.client_ip(client.ip(), &request);
+    match limiter.check(ip, Instant::now()) {
         Ok(()) => next.run(request).await,
         Err(wait) => {
             let seconds = wait.as_secs_f64().ceil().max(1.0) as u64;
@@ -292,9 +309,14 @@ async fn main() -> anyhow::Result<()> {
         challenges: Mutex::new(HashMap::new()),
     });
 
-    let per_ip = Arc::new(RateLimiter::new(args.rate_limit_per_minute, Duration::from_secs(60)));
-    let registrations =
-        Arc::new(RateLimiter::new(args.register_limit_per_hour, Duration::from_secs(60 * 60)));
+    let trust = args.trust_x_real_ip;
+    let per_ip =
+        Arc::new(RateLimiter::new(args.rate_limit_per_minute, Duration::from_secs(60), trust));
+    let registrations = Arc::new(RateLimiter::new(
+        args.register_limit_per_hour,
+        Duration::from_secs(60 * 60),
+        trust,
+    ));
 
     let app = Router::new()
         .route("/health", get(health))
@@ -1041,7 +1063,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_blocks_until_window_ends() {
-        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let limiter = RateLimiter::new(2, Duration::from_secs(60), false);
         let (me, other) = (IpAddr::from([127, 0, 0, 1]), IpAddr::from([10, 0, 0, 1]));
         let t0 = Instant::now();
 
@@ -1051,6 +1073,21 @@ mod tests {
         assert_eq!(wait, Duration::from_secs(40), "blocked until the window ends");
         assert!(limiter.check(other, t0).is_ok(), "limits are per IP");
         assert!(limiter.check(me, t0 + Duration::from_secs(60)).is_ok(), "new window");
+    }
+
+    #[test]
+    fn rate_limiter_reads_x_real_ip_only_when_trusted() {
+        let peer = IpAddr::from([172, 18, 0, 5]);
+        let with_header = |value: &str| {
+            Request::builder().header("x-real-ip", value).body(axum::body::Body::empty()).unwrap()
+        };
+        let trusting = RateLimiter::new(1, Duration::from_secs(60), true);
+        let visitor = trusting.client_ip(peer, &with_header("203.0.113.7"));
+        assert_eq!(visitor, IpAddr::from([203, 0, 113, 7]));
+        assert_eq!(trusting.client_ip(peer, &with_header("garbage")), peer, "invalid header");
+
+        let direct = RateLimiter::new(1, Duration::from_secs(60), false);
+        assert_eq!(direct.client_ip(peer, &with_header("203.0.113.7")), peer, "not trusted");
     }
 
     fn coin(vout: u32) -> OutPoint {

@@ -41,6 +41,9 @@ services:
       - --data-dir=/data
       - --listen=0.0.0.0:3000
       - --cors-origins=http://localhost:3001,http://127.0.0.1:3001
+      # The web container's nginx proxies /api/* here and sets X-Real-IP to the visitor's IP,
+      # so rate limits stay per visitor even through a tunnel like ngrok.
+      - --trust-x-real-ip
     depends_on:
       bitcoind:
         condition: service_healthy

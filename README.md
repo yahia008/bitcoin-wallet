@@ -42,6 +42,19 @@ minutes; later starts are quick. Stop with Ctrl+C (or `docker compose down`). Wa
 server and the node's chain are kept in Docker volumes between runs; `docker compose down -v`
 wipes them. Everything listens on localhost only.
 
+The site's nginx also passes `/api/*` on to the API server, so port 3001 alone serves the whole
+wallet. To show it to others, e.g. in a presentation, tunnel that port with
+[ngrok](https://ngrok.com) (free account; run `ngrok config add-authtoken <token>` once):
+
+```bash
+ngrok http 3001          # share the https://… link it prints
+```
+
+Visitors get HTTPS (which the browser needs for the wallet's crypto) and their own rate limits:
+nginx passes each visitor's IP to the server as `X-Real-IP` (server flag `--trust-x-real-ip`).
+On the free plan each visitor first sees an ngrok warning page; "Visit Site" gets past it.
+Their wallets start empty; fund them with `./fund <their address>`.
+
 For working on the code, run the pieces yourself instead (below): `docker compose up -d bitcoind`
 starts just the node.
 
@@ -137,7 +150,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
   - `502`: chain backend (Bitcoin Core or Esplora) unreachable or failing
   - `500`: anything else (details are only logged on the server)
 
-Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--sync-interval-secs` (default 30): a wallet synced that recently isn't synced again, so a web page load costs one chain scan instead of three, and public Esplora rate limits (blockstream.info: 700 requests/hour) aren't hit; 0 syncs on every request. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
+Server options: `--data-dir` (default `server-data`), `--listen`, `--rate-limit-per-minute` (default 60 requests per IP, all endpoints) and `--register-limit-per-hour` (default 5 registrations per IP), `--trust-x-real-ip` (count limits by the `X-Real-IP` header; only behind a proxy that sets it), plus the same network and backend options as the CLI. Use a separate `--data-dir` per network. `--sync-interval-secs` (default 30): a wallet synced that recently isn't synced again, so a web page load costs one chain scan instead of three, and public Esplora rate limits (blockstream.info: 700 requests/hour) aren't hit; 0 syncs on every request. `--cors-origins` (env `CORS_ORIGINS`, comma-separated, default `http://localhost:3001,http://127.0.0.1:3001`) lists the web pages allowed to call the API from a browser.
 
 ## Web wallet (Osok)
 
