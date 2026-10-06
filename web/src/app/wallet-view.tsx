@@ -17,6 +17,7 @@ import { explorerAddressUrl, formatBtcShort, formatTxTime } from "@/lib/format";
 import { setUpAccount } from "@/lib/accounts";
 import { forgetAccounts, saveAccount, type StoredWallet } from "@/lib/store";
 import { checkPassword, recoverApiToken, verifyReceiveAddress } from "@/lib/wallet";
+import { errorMessage } from "@/lib/errors";
 
 import {
   ArrowDownIcon,
@@ -48,8 +49,6 @@ async function fetchOverview(wallet: StoredWallet): Promise<Loaded> {
   const transactions = await getTransactions(wallet);
   return { balance, transactions };
 }
-
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 type View =
   | "home"
@@ -98,7 +97,7 @@ export function WalletView({
         (loaded) => current && (setData(loaded), setError(undefined), setSignedOut(false)),
         (e) => {
           if (!current) return;
-          setError(message(e));
+          setError(errorMessage(e));
           setSignedOut(e instanceof ApiError && e.status === 401);
         },
       )
@@ -460,7 +459,7 @@ function Addresses({ wallet, version }: { wallet: StoredWallet; version: number 
       )
       .then(
         (checked) => current && setRows(checked.reverse()),
-        (e) => current && setError(message(e)),
+        (e) => current && setError(errorMessage(e)),
       );
     return () => {
       current = false;
@@ -582,7 +581,7 @@ function WalletsScreen({
     let current = true;
     currentReceiveAddress(active).then(
       (info) => current && setAddress(info.address),
-      (e) => current && setError(message(e)),
+      (e) => current && setError(errorMessage(e)),
     );
     return () => {
       current = false;
@@ -808,7 +807,7 @@ function AddAccount({
       await saveAccount(created);
       onAdded();
     } catch (e) {
-      setError(message(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -874,7 +873,7 @@ function SignInAgain({
       await saveAccount({ ...wallet, apiToken });
       onSignedIn();
     } catch (e) {
-      setError(message(e));
+      setError(errorMessage(e));
       setBusy(false);
     }
   }
@@ -1017,7 +1016,7 @@ function Receive({ wallet }: { wallet: StoredWallet }) {
     fetchReceive(wallet, freshCount > 0)
       .then(
         (r) => current && (setShown(r), setError(undefined)),
-        (e) => current && setError(message(e)),
+        (e) => current && setError(errorMessage(e)),
       )
       .finally(() => current && setBusy(false));
     return () => {

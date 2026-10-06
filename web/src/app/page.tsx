@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { API_URL, health, type Health } from "@/lib/api";
 import { loadAccounts, setActiveAccount, type Accounts, type StoredWallet } from "@/lib/store";
+import { errorMessage } from "@/lib/errors";
 
 import { Logo } from "./logo";
 import { Card, WalletSetup } from "./wallet-setup";
@@ -23,7 +24,7 @@ export default function Home() {
       // The accounts saved in this browser for the server's network, if any.
       setStatus({ kind: "ok", health: h, accounts: await loadAccounts(h.network) });
     })().catch((e: unknown) =>
-      setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) }),
+      setStatus({ kind: "error", message: errorMessage(e) }),
     );
   }, []);
 
@@ -54,9 +55,10 @@ export default function Home() {
       <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 px-4">
         <Logo className="h-12 w-12 opacity-60" />
         <Card title="Can't reach the wallet server">
-          <p className="text-sm text-zinc-400">
-            {status.message}. Is the server running at <span className="font-mono">{API_URL}</span>,
-            with CORS allowing this page?
+          <p className="text-sm text-zinc-400">{status.message}</p>
+          <p className="mt-3 text-xs text-zinc-500">
+            Osok looks for it at <span className="font-mono">{API_URL}</span>. If you run the
+            server yourself, check that it&apos;s started and allows this page (CORS).
           </p>
         </Card>
       </main>

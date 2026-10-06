@@ -3,6 +3,7 @@
 // second implementation of the security checks. `npm run wasm` generates src/wasm/.
 
 import { recoverToken, requestChallenge } from "@/lib/api";
+import { ReviewError } from "@/lib/errors";
 import init, * as wasm from "@/wasm/wallet_wasm";
 
 let ready: Promise<typeof wasm> | null = null;
@@ -98,8 +99,19 @@ export async function reviewSend(
   amountSat: number,
 ): Promise<SendReview> {
   const w = await loadWallet();
-  const { changeIndexes, ...review } = w.reviewSend(wallet, psbt, to, BigInt(amountSat));
+  const { changeIndexes, ...review } = refused(() =>
+    w.reviewSend(wallet, psbt, to, BigInt(amountSat)),
+  );
   return { ...review, changeAddresses: changeAddresses(w, wallet, changeIndexes) };
+}
+
+/** Runs a review, turning its failure into a ReviewError: the server's transaction was refused. */
+function refused<T>(review: () => T): T {
+  try {
+    return review();
+  } catch (e) {
+    throw new ReviewError(e instanceof Error ? e.message : String(e));
+  }
 }
 
 /** Decrypts the account key with `password` inside WASM and signs `psbt`. The key never
@@ -136,7 +148,7 @@ export async function reviewBump(
   txid: string,
 ): Promise<BumpReview> {
   const w = await loadWallet();
-  const { changeIndexes, ...review } = w.reviewBump(wallet, psbt, originalTx, txid);
+  const { changeIndexes, ...review } = refused(() => w.reviewBump(wallet, psbt, originalTx, txid));
   return { ...review, changeAddresses: changeAddresses(w, wallet, changeIndexes) };
 }
 

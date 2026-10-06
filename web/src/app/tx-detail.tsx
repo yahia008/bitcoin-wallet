@@ -5,12 +5,11 @@ import { useEffect, useState } from "react";
 import { getTransaction, type TransactionDetail, type TxIo } from "@/lib/api";
 import { explorerTxUrl, formatBtc, formatBtcShort } from "@/lib/format";
 import type { StoredWallet } from "@/lib/store";
+import { errorMessage } from "@/lib/errors";
 
 import { ArrowDownIcon, ArrowUpIcon, CheckIcon, CopyIcon, ExternalLinkIcon } from "./icons";
 import { SpeedUp } from "./speed-up";
 import { Button, Card } from "./wallet-setup";
-
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** One transaction in full: amount, status, fee, its inputs and outputs (ours marked), and
  * Speed up while it's unconfirmed. Everything here comes from the server, so it's for
@@ -34,7 +33,7 @@ export function TxDetail({
     let current = true;
     getTransaction(wallet, txid).then(
       (t) => current && setTx(t),
-      (e) => current && setError(message(e)),
+      (e) => current && setError(errorMessage(e)),
     );
     return () => {
       current = false;

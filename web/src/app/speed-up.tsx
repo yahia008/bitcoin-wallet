@@ -6,6 +6,7 @@ import { broadcast, bumpFee } from "@/lib/api";
 import { formatBtc } from "@/lib/format";
 import type { StoredWallet } from "@/lib/store";
 import { reviewBump, signPsbt, type BumpReview } from "@/lib/wallet";
+import { errorMessage } from "@/lib/errors";
 
 import { Button } from "./wallet-setup";
 
@@ -40,7 +41,7 @@ export function SpeedUp({
     try {
       await action();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }

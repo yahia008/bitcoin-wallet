@@ -41,7 +41,7 @@ test("send half: review sheet, wrong password refused, then sent", async ({ page
   await page.getByRole("button", { name: /^Send to / }).click();
   await page.getByLabel("Wallet password").fill("not my password");
   await page.getByRole("button", { name: "Sign and send" }).click();
-  await expect(page.getByText(/wrong password/)).toBeVisible();
+  await expect(page.getByText("That's not your wallet password.")).toBeVisible();
 
   await page.getByLabel("Wallet password").fill("correct horse battery");
   await page.getByRole("button", { name: "Sign and send" }).click();

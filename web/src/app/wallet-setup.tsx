@@ -5,6 +5,7 @@ import { useState } from "react";
 import { setUpAccount } from "@/lib/accounts";
 import { saveAccount, type StoredWallet } from "@/lib/store";
 import { loadWallet } from "@/lib/wallet";
+import { errorMessage } from "@/lib/errors";
 
 import { Logo } from "./logo";
 
@@ -258,7 +259,7 @@ function PhraseStep({
       await saveAccount(wallet);
       onReady(wallet);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }

@@ -6,6 +6,7 @@ import { broadcast, buildPsbt, type FeePriority } from "@/lib/api";
 import { explorerTxUrl, formatBtc, formatBtcShort, parseBtc } from "@/lib/format";
 import type { StoredWallet } from "@/lib/store";
 import { checkAddress, reviewSend, signPsbt, type SendReview } from "@/lib/wallet";
+import { errorMessage } from "@/lib/errors";
 
 import {
   ArrowDownIcon,
@@ -37,8 +38,6 @@ const PRIORITIES: { value: FeePriority; label: string; hint: string }[] = [
   { value: "normal", label: "Normal", hint: "~1 hour" },
   { value: "fast", label: "Fast", hint: "~20 min" },
 ];
-
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Pay someone, in steps: recipient address (checked in the browser as you type), amount and
  * fee speed, then the review: the server builds an unsigned PSBT, this browser checks it with
@@ -208,7 +207,7 @@ function AddressStep({
     let current = true;
     checkAddress(address, network).then(
       () => current && setCheck({ for: address }),
-      (e) => current && setCheck({ for: address, error: message(e) }),
+      (e) => current && setCheck({ for: address, error: errorMessage(e) }),
     );
     return () => {
       current = false;
@@ -325,7 +324,7 @@ function AmountStep({
       const checked = await reviewSend(wallet, built.psbt, address, amountSat);
       onReviewed(built.psbt, amountSat, checked);
     } catch (e) {
-      setError(message(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -483,7 +482,7 @@ function ReviewStep({
       const { txid } = await broadcast(wallet, signed);
       onSent(txid);
     } catch (e) {
-      setError(message(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
