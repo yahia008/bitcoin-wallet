@@ -6,6 +6,8 @@ import { defineConfig } from "@playwright/test";
 
 const API = "http://127.0.0.1:3925";
 const SITE = "http://127.0.0.1:3002";
+/** Nothing listens here. */
+const DOWN_API = "http://127.0.0.1:9";
 
 export default defineConfig({
   testDir: "e2e",
@@ -39,8 +41,13 @@ export default defineConfig({
     },
     {
       // The site built against that server, into e2e-build/ (not out/), served statically.
+      // Testnet4 is offered too, at a port where nothing listens: a network whose server is
+      // down (e2e/network.spec.ts).
       command: "npm run build && node e2e/serve.mjs e2e-build 3002",
-      env: { NEXT_DIST_DIR: "e2e-build", NEXT_PUBLIC_API_URL: API },
+      env: {
+        NEXT_DIST_DIR: "e2e-build",
+        NEXT_PUBLIC_API_URLS: `regtest=${API},testnet4=${DOWN_API}`,
+      },
       url: SITE,
       timeout: 900_000,
       reuseExistingServer: false,

@@ -48,6 +48,17 @@ minutes; later starts are quick. Stop with Ctrl+C (or `docker compose down`). Wa
 server and the node's chain are kept in Docker volumes between runs; `docker compose down -v`
 wipes them. Everything listens on localhost only.
 
+The network badge at the top right switches between **regtest** and **testnet4**, the public
+test network. Each network has its own wallet in the browser. Testnet4 needs its own API server,
+which reads the chain from mempool.space and so needs internet access; start it with:
+
+```bash
+docker compose --profile testnet4 up     # everything above, plus the testnet4 API server
+```
+
+Without it, picking testnet4 shows "Can't reach the wallet server", with the badge to switch
+back. Testnet4 coins come from a faucet (search "testnet4 faucet"); blocks take ~10 minutes.
+
 The site's nginx also passes `/api/*` on to the API server, so port 3001 alone serves the whole
 wallet. To show it to others, e.g. in a presentation, tunnel that port with
 [ngrok](https://ngrok.com) (free account; run `ngrok config add-authtoken <token>` once):
@@ -171,7 +182,7 @@ cd web && npm install && npm run dev                                       # wal
 
 Open http://localhost:3001. It shows whether it can reach the API and on which network, then lets you create a wallet (12 new words, shown once) or restore one from its words. The browser derives the account key, encrypts it with your password (the same Argon2id + XChaCha20-Poly1305 code as the CLI, in `wallet_core::crypto`) and keeps only that, plus the public descriptors and API token, in IndexedDB. Only the public descriptors are sent to the server. Once set up, it shows the balance, a receive address with a QR code, and the transaction history. Every receive address the server hands out is re-derived in the browser from the wallet's own public descriptor and refused if it differs, so a compromised server can't show its own address as yours. Sending works like the CLI's `send --server`: the server builds an unsigned PSBT, the browser checks it with the same `review` and `check_fee` code (in WASM), shows the amount, fee, rate and change, and on your password decrypts the key and signs inside WASM, so the key never reaches JavaScript. A fee that looks like a mistake has to be confirmed explicitly. Tapping a transaction opens its details: date, block, fee and rate, size, the txid with an explorer link, and where the coins came from and went, with your own addresses and change marked. Unconfirmed transactions you sent get a "Speed up" button there (RBF, like the CLI's `bump --server`): the server builds the replacement and sends the original along, and the browser runs `review_bump` (the original's txid must match, every payment must be unchanged, the fee must be higher) before you sign.
 
-For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d bitcoind`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`).
+For developing the web wallet, regtest is the smoothest backend (no rate limits, blocks on demand): `docker compose up -d bitcoind`, then `cargo run --bin server` (regtest is the default). Set `NEXT_PUBLIC_API_URL` to point it at another server (default `http://127.0.0.1:3000`), or `NEXT_PUBLIC_API_URLS` to offer several networks in the network menu, one server each (e.g. `regtest=http://127.0.0.1:3000,testnet4=http://127.0.0.1:3010`; the first is the default).
 
 ## Security model
 

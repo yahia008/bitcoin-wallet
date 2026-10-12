@@ -4,6 +4,32 @@
 /** Where the API server runs. Baked in at build time (NEXT_PUBLIC_ variables are). */
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:3000";
 
+/** An API server, and the network it serves (unknown until its /health says, for the single
+ * NEXT_PUBLIC_API_URL). */
+export type ApiServer = { network?: string; url: string };
+
+/** One API server per network the site offers, the first being the default:
+ * NEXT_PUBLIC_API_URLS, e.g. "regtest=/api,testnet4=/api-testnet4". Without it, the one
+ * NEXT_PUBLIC_API_URL server, on whichever network it runs. */
+export const API_SERVERS: ApiServer[] = parseServers(process.env.NEXT_PUBLIC_API_URLS) ?? [
+  { url: API_URL },
+];
+
+function parseServers(list: string | undefined): ApiServer[] | undefined {
+  const servers = (list ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [network, url] = entry.split("=").map((part) => part.trim());
+      if (!network || !url) {
+        throw new Error(`NEXT_PUBLIC_API_URLS: expected network=url, got "${entry}"`);
+      }
+      return { network, url };
+    });
+  return servers.length > 0 ? servers : undefined;
+}
+
 /** An error answer from the API: its HTTP status plus the `{"error": ...}` message. */
 export class ApiError extends Error {
   constructor(
@@ -14,7 +40,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit, base = API_URL): Promise<T> {
+async function request<T>(path: string, init: RequestInit | undefined, base: string): Promise<T> {
   const res = await fetch(`${base}${path}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
@@ -29,8 +55,8 @@ export type Health = {
   network: string;
 };
 
-export function health(): Promise<Health> {
-  return request("/health");
+export function health(base: string): Promise<Health> {
+  return request("/health", undefined, base);
 }
 
 export type Registration = {
@@ -39,14 +65,18 @@ export type Registration = {
   token: string;
 };
 
-/** Registers a wallet's public descriptors, making the server watch it. */
-export function register(external: string, internal: string): Promise<Registration> {
-  return request("/wallets", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    // Birthday 0: scan from genesis. Esplora backends ignore it anyway.
-    body: JSON.stringify({ external, internal, birthday: 0 }),
-  });
+/** Registers a wallet's public descriptors with the server at `base`, making it watch it. */
+export function register(base: string, external: string, internal: string): Promise<Registration> {
+  return request(
+    "/wallets",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Birthday 0: scan from genesis. Esplora backends ignore it anyway.
+      body: JSON.stringify({ external, internal, birthday: 0 }),
+    },
+    base,
+  );
 }
 
 // Per-wallet endpoints. They need the wallet's API token, and use the server it registered
@@ -172,16 +202,27 @@ export const bumpFee = (w: WalletAuth, req: BumpRequest) =>
 // need no token; the signature over the challenge proves we hold the wallet's key.
 
 /** A one-time challenge to sign with the wallet's key. */
-export const requestChallenge = (walletId: string) =>
-  request<{ challenge: string; expires_in_secs: number }>(`/wallets/${walletId}/challenge`, {
-    method: "POST",
-  });
+export const requestChallenge = (base: string, walletId: string) =>
+  request<{ challenge: string; expires_in_secs: number }>(
+    `/wallets/${walletId}/challenge`,
+    { method: "POST" },
+    base,
+  );
 
 /** Trades a signed challenge for a new API token. The wallet's other tokens (other devices)
  * keep working. */
-export const recoverToken = (walletId: string, challenge: string, signature: string) =>
-  request<{ token: string }>(`/wallets/${walletId}/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ challenge, signature }),
-  });
+export const recoverToken = (
+  base: string,
+  walletId: string,
+  challenge: string,
+  signature: string,
+) =>
+  request<{ token: string }>(
+    `/wallets/${walletId}/token`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ challenge, signature }),
+    },
+    base,
+  );

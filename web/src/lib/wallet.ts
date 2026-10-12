@@ -152,15 +152,16 @@ export async function reviewBump(
   return { ...review, changeAddresses: changeAddresses(w, wallet, changeIndexes) };
 }
 
-/** Gets a new API token for an already-registered wallet by proving we hold its key: the
- * server sends a one-time challenge, we sign it in WASM (key decrypted with `password`). */
+/** Gets a new API token from the server at `wallet.apiUrl`, for a wallet already registered
+ * there, by proving we hold its key: the server sends a one-time challenge, we sign it in
+ * WASM (key decrypted with `password`). */
 export async function recoverApiToken(
-  wallet: WalletKeys & { walletId: string },
+  wallet: WalletKeys & { walletId: string; apiUrl: string },
   password: string,
 ): Promise<string> {
-  const { challenge } = await requestChallenge(wallet.walletId);
+  const { challenge } = await requestChallenge(wallet.apiUrl, wallet.walletId);
   const signature = (await loadWallet()).proveOwnership(wallet, password, challenge);
-  return (await recoverToken(wallet.walletId, challenge, signature)).token;
+  return (await recoverToken(wallet.apiUrl, wallet.walletId, challenge, signature)).token;
 }
 
 /** Throws a readable reason unless `address` is a valid address for `network` (catches typos

@@ -15,8 +15,11 @@ WebAssembly in `src/wasm/` (generated, not committed). That needs `wasm-pack` an
 It uses the size-optimised `wasm` Cargo profile (opt-level z, LTO) and secp256k1's
 `lowmemory` tables, which keep the download to about 1.3 MB, or 0.5 MB gzipped.
 
-`NEXT_PUBLIC_API_URL` sets the API server (default `http://127.0.0.1:3000`). It's read at build
-time. The API server must list this page's origin in `--cors-origins`.
+`NEXT_PUBLIC_API_URL` sets the API server (default `http://127.0.0.1:3000`). To offer several
+networks in the network menu, set `NEXT_PUBLIC_API_URLS` instead: one `network=url` per server,
+comma-separated, the first being the default, e.g.
+`regtest=http://127.0.0.1:3000,testnet4=http://127.0.0.1:3010`. Both are read at build time.
+Each API server must list this page's origin in `--cors-origins`.
 
 ## End-to-end tests
 

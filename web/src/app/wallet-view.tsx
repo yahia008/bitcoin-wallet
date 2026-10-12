@@ -36,6 +36,7 @@ import {
   RefreshIcon,
 } from "./icons";
 import { Logo } from "./logo";
+import { NetworkBadge } from "./network-menu";
 import { PasswordCard } from "./password-card";
 import { Send } from "./send";
 import { TxDetail } from "./tx-detail";
@@ -69,6 +70,7 @@ export function WalletView({
   accounts,
   onSwitch,
   onAccountsChanged,
+  onNetworkChange,
 }: {
   /** The active account. */
   wallet: StoredWallet;
@@ -77,6 +79,8 @@ export function WalletView({
   onSwitch: (account: StoredWallet) => void;
   /** An account was added, or the wallet forgotten: reload from storage. */
   onAccountsChanged: () => void;
+  /** Picked in the network menu: show that network's wallet instead. */
+  onNetworkChange: (network: string) => void;
 }) {
   const [view, setView] = useState<View>("home");
   const [data, setData] = useState<Loaded>();
@@ -211,9 +215,7 @@ export function WalletView({
         <IconButton label="Wallet settings" onClick={() => setView("settings")}>
           <DotsIcon />
         </IconButton>
-        <span className="rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-400">
-          {wallet.network}
-        </span>
+        <NetworkBadge network={wallet.network} onSelect={onNetworkChange} />
       </div>
 
       <div className="mt-8 flex flex-col items-center text-center">
@@ -801,6 +803,8 @@ function AddAccount({
         words,
         password,
         wallet.network,
+        // Every account of the wallet uses the same server.
+        wallet.apiUrl,
         next,
         wallet.masterFingerprint,
       );

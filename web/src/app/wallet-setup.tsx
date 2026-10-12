@@ -8,6 +8,7 @@ import { loadWallet } from "@/lib/wallet";
 import { errorMessage } from "@/lib/errors";
 
 import { Logo } from "./logo";
+import { NetworkBadge } from "./network-menu";
 
 const MIN_PASSWORD_LEN = 8; // same as wallet-core's crypto::MIN_PASSWORD_LEN
 
@@ -22,10 +23,15 @@ type Step =
  * typed when restoring). Then the wallet is created and registered. */
 export function WalletSetup({
   network,
+  apiUrl,
   onReady,
+  onNetworkChange,
 }: {
   network: string;
+  /** The API server for `network`, where the wallet gets registered. */
+  apiUrl: string;
   onReady: (wallet: StoredWallet) => void;
+  onNetworkChange: (network: string) => void;
 }) {
   const [step, setStep] = useState<Step>({ kind: "welcome" });
   // Kept here so Back from the phrase step returns to a filled-in password step.
@@ -33,7 +39,10 @@ export function WalletSetup({
 
   if (step.kind === "welcome") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center px-4 py-16">
+      <div className="relative flex flex-1 flex-col items-center justify-center px-4 py-16">
+        <div className="absolute top-6 right-4">
+          <NetworkBadge network={network} onSelect={onNetworkChange} />
+        </div>
         <Logo className="h-16 w-16" />
         <h1 className="mt-6 text-4xl tracking-tight">Osok Wallet</h1>
         <div className="mt-8 flex w-full max-w-xs flex-col gap-3">
@@ -80,6 +89,7 @@ export function WalletSetup({
     <SetupScreen>
       <PhraseStep
         network={network}
+        apiUrl={apiUrl}
         password={step.password}
         generatedWords={step.words}
         onBack={() => setStep({ kind: "password", intent: step.intent })}
@@ -232,12 +242,14 @@ function PasswordStep({
 
 function PhraseStep({
   network,
+  apiUrl,
   password,
   generatedWords,
   onBack,
   onReady,
 }: {
   network: string;
+  apiUrl: string;
   password: string;
   /** Set when creating: the new phrase to show. Unset when restoring: the user types it. */
   generatedWords?: string;
@@ -255,7 +267,7 @@ function PhraseStep({
     setError(undefined);
     try {
       // The first account, m/84'/1'/0'. More can be added later from the dashboard.
-      const wallet = await setUpAccount(words, password, network, 0);
+      const wallet = await setUpAccount(words, password, network, apiUrl, 0);
       await saveAccount(wallet);
       onReady(wallet);
     } catch (e) {

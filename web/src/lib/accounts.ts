@@ -1,18 +1,20 @@
 // Turning a recovery phrase into a registered account, shared by first-time setup and
 // "Add account".
 
-import { API_URL, ApiError, register } from "@/lib/api";
+import { ApiError, register } from "@/lib/api";
 import type { StoredWallet } from "@/lib/store";
 import { createWallet, recoverApiToken } from "@/lib/wallet";
 
 /** Derives account `account` from `words`, encrypts its key with `password`, and registers
- * its public descriptors with the API. Returns the account to store; doesn't store it.
+ * its public descriptors with the API server at `apiUrl` (the one for `network`). Returns the
+ * account to store; doesn't store it.
  * With `sameWalletAs` (a master key fingerprint), refuses a phrase from another wallet
  * before anything is sent to the server. */
 export async function setUpAccount(
   words: string,
   password: string,
   network: string,
+  apiUrl: string,
   account: number,
   sameWalletAs?: string,
 ): Promise<StoredWallet> {
@@ -26,7 +28,7 @@ export async function setUpAccount(
   // Only the public descriptors go to the server.
   let apiToken: string;
   try {
-    const registration = await register(created.external, created.internal);
+    const registration = await register(apiUrl, created.external, created.internal);
     if (registration.id !== created.walletId) {
       throw new Error("the server computed a different wallet id; not saving");
     }
@@ -35,7 +37,7 @@ export async function setUpAccount(
     if (!(e instanceof ApiError && e.status === 409)) throw e;
     // Already registered (e.g. restored after "Forget"): the server won't hand out the old
     // token, so prove we hold the key and get a new one.
-    apiToken = await recoverApiToken(created, password);
+    apiToken = await recoverApiToken({ ...created, apiUrl }, password);
   }
   return {
     walletId: created.walletId,
@@ -47,7 +49,7 @@ export async function setUpAccount(
     internal: created.internal,
     firstAddress: created.firstAddress,
     encryptedKey: created.encryptedKey,
-    apiUrl: API_URL,
+    apiUrl,
     apiToken,
     createdAt: new Date().toISOString(),
   };

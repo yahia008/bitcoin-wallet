@@ -15,7 +15,7 @@ cd ~/bitcoin_wallet/bitcoin-wallet
 cargo test --workspace                       # 49 unit tests, no node needed
 docker compose up -d bitcoind                         # start Bitcoin Core (regtest)
 cargo test --test regtest -- --ignored       # 4 end-to-end API tests against the node
-cd web && npm run e2e                        # 10 browser tests of the web wallet (see below)
+cd web && npm run e2e                        # 13 browser tests of the web wallet (see below)
 ```
 
 | Test | What it checks |
@@ -57,6 +57,8 @@ sudo npx playwright install-deps chromium  # the system libraries it needs (libn
 | `send` | The address step names a wrong network and catches a one-character typo; 50% → review sheet → transaction details → a wrong password is refused → sent; Max sends everything with no change and leaves 0 |
 | `speed-up` | Opening an unconfirmed send shows its details (status, your change); Speed up there makes the node's mempool drop the original and hold exactly one replacement |
 | `accounts` | Rename an account; adding one refuses a wrong password and another wallet's phrase; Account 2 is added; balances show per account and switching works |
+| `sign-in-again` | Opening the wallet in a second browser keeps the first signed in; a device whose token the server stopped accepting signs back in with its password (a wrong one is refused first) |
+| `network` | The network badge switches to testnet4 (its server is down in the tests: the page says so and keeps the menu), the choice survives a reload, and switching back shows the regtest wallet again |
 
 If a test fails, Playwright saves a screenshot and a trace in `web/e2e-results/`
 (`npx playwright show-trace <trace.zip>` replays it step by step), and an HTML report in
