@@ -38,6 +38,7 @@ import {
 import { Logo } from "./logo";
 import { NetworkBadge } from "./network-menu";
 import { PasswordCard } from "./password-card";
+import { CopyStatus, useCopy } from "./use-copy";
 import { Send } from "./send";
 import { TxDetail } from "./tx-detail";
 import { Button, Card, ImportPhrase } from "./wallet-setup";
@@ -573,7 +574,7 @@ function WalletsScreen({
 }) {
   const balances = useBalances(accounts);
   const [address, setAddress] = useState<string>();
-  const [copied, setCopied] = useState(false);
+  const { copy, copied, failed } = useCopy();
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(active.name);
   const [error, setError] = useState<string>();
@@ -589,13 +590,6 @@ function WalletsScreen({
       current = false;
     };
   }, [active]);
-
-  async function copy() {
-    if (!address) return;
-    await navigator.clipboard.writeText(address);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
 
   async function rename() {
     const trimmed = name.trim();
@@ -648,7 +642,7 @@ function WalletsScreen({
           </RoundAction>
           <RoundAction
             label={copied ? "Copied" : "Copy address"}
-            onClick={copy}
+            onClick={() => address && copy(address)}
             disabled={!address}
           >
             {copied ? <CheckIcon /> : <CopyIcon />}
@@ -664,14 +658,15 @@ function WalletsScreen({
             <PencilIcon />
           </RoundAction>
         </div>
-        <p className="mt-2 h-4 text-xs text-zinc-500">
-          {error ??
-            (copied
-              ? "Address copied"
-              : !explorer && address
-                ? "No explorer for this network"
-                : "")}
-        </p>
+        {error ? (
+          <p className="mt-2 h-4 text-xs text-red-500">{error}</p>
+        ) : copied || failed ? (
+          <CopyStatus copied={copied} failed={failed} what="Address" />
+        ) : (
+          <p className="mt-2 h-4 text-xs text-zinc-500">
+            {!explorer && address ? "No explorer for this network" : ""}
+          </p>
+        )}
       </div>
 
       <ul className="mt-4 flex-1 border-t border-zinc-800 pt-2">
@@ -1014,6 +1009,7 @@ function Receive({ wallet }: { wallet: StoredWallet }) {
   const [error, setError] = useState<string>();
   // Bumped by "New address"; 0 means reuse an unused one.
   const [freshCount, setFreshCount] = useState(0);
+  const { copy, copied, failed } = useCopy();
 
   useEffect(() => {
     let current = true;
@@ -1055,11 +1051,25 @@ function Receive({ wallet }: { wallet: StoredWallet }) {
             Address #{address.index} · checked against your own keys
           </p>
           <div className="mt-4 flex gap-2">
-            <Button onClick={() => navigator.clipboard.writeText(address.address)}>Copy</Button>
+            <Button
+              onClick={() => copy(address.address)}
+              className="inline-flex items-center gap-1.5"
+            >
+              {copied ? (
+                <>
+                  <CheckIcon /> Copied
+                </>
+              ) : (
+                <>
+                  <CopyIcon /> Copy
+                </>
+              )}
+            </Button>
             <Button variant="secondary" onClick={fresh} disabled={busy}>
               New address
             </Button>
           </div>
+          <CopyStatus copied={copied} failed={failed} what="Address" />
         </div>
       )}
       {!address && !error && <p className="text-center text-sm text-zinc-500">Loading…</p>}

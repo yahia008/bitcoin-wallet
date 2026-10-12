@@ -22,3 +22,23 @@ test("receive: the address moves on once used, and Addresses shows used / unused
   await expect(page.getByText("Used", { exact: true })).toBeVisible();
   await expect(page.getByText("Unused", { exact: true })).toBeVisible();
 });
+
+test("Copy says the address was copied, and puts it on the clipboard", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await importWallet(page, newPhrase());
+  await page.getByRole("button", { name: "Receive" }).first().click();
+  await expect(page.getByText("checked against your own keys")).toBeVisible();
+  const address = (await page.locator("p.font-mono").first().innerText()).trim();
+
+  await page.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Address copied to clipboard");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(address);
+
+  // A moment later the button is back to normal.
+  await expect(page.getByRole("button", { name: "Copy", exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("");
+});

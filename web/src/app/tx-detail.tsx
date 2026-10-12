@@ -9,6 +9,7 @@ import { errorMessage } from "@/lib/errors";
 
 import { ArrowDownIcon, ArrowUpIcon, CheckIcon, CopyIcon, ExternalLinkIcon } from "./icons";
 import { SpeedUp } from "./speed-up";
+import { CopyStatus, useCopy } from "./use-copy";
 import { Button, Card } from "./wallet-setup";
 
 /** One transaction in full: amount, status, fee, its inputs and outputs (ours marked), and
@@ -27,7 +28,7 @@ export function TxDetail({
   const [tx, setTx] = useState<TransactionDetail>();
   const [error, setError] = useState<string>();
   const [speedingUp, setSpeedingUp] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const { copy, copied, failed } = useCopy();
 
   useEffect(() => {
     let current = true;
@@ -39,12 +40,6 @@ export function TxDetail({
       current = false;
     };
   }, [wallet, txid]);
-
-  async function copy() {
-    await navigator.clipboard.writeText(txid);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
 
   if (error) return <p className="py-8 text-center text-sm text-red-500">{error}</p>;
   if (!tx) return <p className="py-8 text-center text-sm text-zinc-500">Loading…</p>;
@@ -133,11 +128,14 @@ export function TxDetail({
             <button
               aria-label={copied ? "Copied" : "Copy transaction ID"}
               title={copied ? "Copied" : "Copy transaction ID"}
-              onClick={copy}
-              className="shrink-0 text-zinc-400 hover:text-zinc-100"
+              onClick={() => copy(txid)}
+              className={`shrink-0 hover:text-zinc-100 ${copied ? "text-emerald-400" : "text-zinc-400"}`}
             >
               {copied ? <CheckIcon /> : <CopyIcon />}
             </button>
+          </dd>
+          <dd className="col-start-2 -mt-2">
+            <CopyStatus copied={copied} failed={failed} what="Transaction ID" />
           </dd>
         </dl>
         {url && (
