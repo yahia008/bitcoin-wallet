@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { broadcast, buildPsbt, type FeePriority } from "@/lib/api";
+import { parsePaymentRequest, type PaymentRequest } from "@/lib/bip21";
 import { explorerTxUrl, formatBtc, formatBtcShort, parseBtc } from "@/lib/format";
 import type { StoredWallet } from "@/lib/store";
 import { checkAddress, reviewSend, signPsbt, type SendReview } from "@/lib/wallet";
@@ -19,10 +20,12 @@ import {
   FeeIcon,
   GearIcon,
   ListIcon,
+  ScanIcon,
   UserIcon,
 } from "./icons";
 import { Logo } from "./logo";
 import { PasswordCard } from "./password-card";
+import { QrScanner } from "./qr-scanner";
 
 /** What the user chose to send: an exact amount, or everything ("Max"). */
 type Amount = { kind: "exact"; sats: number } | { kind: "all" };
@@ -70,6 +73,19 @@ export function Send({
         onChange={setTo}
         onClose={onClose}
         onContinue={() => setStep({ kind: "amount" })}
+        onPaymentRequest={(request) => {
+          // A scanned or pasted payment link: take its address and amount, and skip ahead
+          // to the amount step once the address checks out for this wallet's network.
+          setTo(request.address);
+          if (request.amountSat !== undefined) {
+            setAmountText(formatBtcShort(request.amountSat));
+            setSendAll(false);
+          }
+          checkAddress(request.address, wallet.network).then(
+            () => setStep({ kind: "amount" }),
+            () => {}, // the address step shows what's wrong with it
+          );
+        }}
       />
     );
   }
@@ -184,23 +200,38 @@ function PrimaryButton({
   );
 }
 
-/** Step 1: the recipient. Checked against the wallet's network on every keystroke; Continue
- * appears once it's valid. */
+/** Step 1: the recipient, typed, pasted or scanned from a QR code. Checked against the
+ * wallet's network on every keystroke; Continue appears once it's valid. A `bitcoin:` payment
+ * link (scanned or pasted) fills in the amount too and goes straight on. */
 function AddressStep({
   network,
   value,
   onChange,
   onClose,
   onContinue,
+  onPaymentRequest,
 }: {
   network: string;
   value: string;
   onChange: (value: string) => void;
   onClose: () => void;
   onContinue: () => void;
+  onPaymentRequest: (request: PaymentRequest) => void;
 }) {
   const [check, setCheck] = useState<{ for: string; error?: string }>();
+  const [scanning, setScanning] = useState(false);
+  const [linkError, setLinkError] = useState<string>();
   const address = value.trim();
+
+  function takePaymentText(text: string) {
+    setScanning(false);
+    setLinkError(undefined);
+    try {
+      onPaymentRequest(parsePaymentRequest(text));
+    } catch (e) {
+      setLinkError(errorMessage(e));
+    }
+  }
 
   useEffect(() => {
     if (!address) return;
@@ -219,7 +250,8 @@ function AddressStep({
   const valid = result !== undefined && result.error === undefined;
 
   return (
-    <div className="flex min-h-[560px] flex-1 flex-col">
+    <div className="relative flex min-h-[560px] flex-1 flex-col">
+      {scanning && <QrScanner onScan={takePaymentText} onClose={() => setScanning(false)} />}
       <Header title="Send" onClose={onClose} />
       <label
         className={`mt-6 flex h-12 items-center gap-3 rounded-xl border bg-zinc-950/60 px-4 ${
@@ -235,7 +267,11 @@ function AddressStep({
           aria-label="Recipient address"
           className="flex-1 bg-transparent font-mono text-sm placeholder:font-sans placeholder:text-zinc-500 focus:outline-none"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            setLinkError(undefined);
+            if (/^bitcoin:/i.test(e.target.value.trim())) takePaymentText(e.target.value);
+            else onChange(e.target.value);
+          }}
           onKeyDown={(e) => e.key === "Enter" && valid && onContinue()}
           autoComplete="off"
           spellCheck={false}
@@ -245,8 +281,18 @@ function AddressStep({
             <CheckIcon />
           </span>
         )}
+        <button
+          type="button"
+          aria-label="Scan QR code"
+          title="Scan QR code"
+          onClick={() => setScanning(true)}
+          className="-mr-2 flex h-9 w-9 items-center justify-center rounded-full text-zinc-300 hover:bg-zinc-800/60"
+        >
+          <ScanIcon />
+        </button>
       </label>
-      {result?.error && <p className="mt-2 text-sm text-red-500">{result.error}</p>}
+      {linkError && <p className="mt-2 text-sm text-red-500">{linkError}</p>}
+      {!linkError && result?.error && <p className="mt-2 text-sm text-red-500">{result.error}</p>}
       {valid && <p className="mt-2 text-sm text-zinc-400">Valid {network} address.</p>}
       <div className="flex-1" />
       {valid && <PrimaryButton onClick={onContinue}>Continue</PrimaryButton>}

@@ -163,3 +163,17 @@ export const EyeOffIcon = (p: Props) => (
     <path d="M3 3l14 14" />
   </Icon>
 );
+
+export const ScanIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7M17 13v2.5a1.5 1.5 0 0 1-1.5 1.5H13M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13M6.5 10h7" />
+  </Icon>
+);
+
+export const ImageIcon = (p: Props) => (
+  <Icon {...p} className="h-4 w-4">
+    <rect x="3" y="4" width="14" height="12" rx="2" />
+    <circle cx="7.5" cy="8.5" r="1.3" />
+    <path d="m17 13-4-4-7 7" />
+  </Icon>
+);

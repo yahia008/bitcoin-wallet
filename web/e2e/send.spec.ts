@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import QRCode from "qrcode";
 
 import { newFunderAddress } from "./bitcoind";
 import { balance, confirmSend, fundWallet, importWallet, newPhrase, startSend } from "./helpers";
@@ -58,4 +59,39 @@ test("Max sends everything: no change, balance ends at 0", async ({ page }) => {
   await page.getByRole("button", { name: "Done" }).click();
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(balance(page)).toHaveText(/^0\s*BTC$/);
+});
+
+test("a pasted bitcoin: link fills in the address and amount", async ({ page }) => {
+  const to = await newFunderAddress();
+  await page.getByRole("button", { name: "Send" }).first().click();
+  await page.getByLabel("Recipient address").fill(`bitcoin:${to}?amount=0.25&label=Pizza`);
+  // Straight on to the amount step, with the link's amount.
+  await expect(page.getByLabel("Amount in BTC")).toHaveValue("0.25");
+  await page.getByRole("button", { name: "Review Send" }).click();
+  await expect(page.getByText("You are sending")).toBeVisible();
+  await expect(page.getByText("0.25 BTC", { exact: true })).toBeVisible();
+});
+
+test("a payment link this wallet can't honour is refused", async ({ page }) => {
+  await page.getByRole("button", { name: "Send" }).first().click();
+  const to = await newFunderAddress();
+  await page.getByLabel("Recipient address").fill(`bitcoin:${to}?req-somethingnew=1`);
+  await expect(page.getByText("asks for something this wallet doesn't support")).toBeVisible();
+  await expect(page.getByLabel("Amount in BTC")).toHaveCount(0);
+});
+
+test("scan: a picture of a payment QR code (upper-case, as wallets print them)", async ({ page }) => {
+  const to = await newFunderAddress();
+  const png = await QRCode.toBuffer(`BITCOIN:${to.toUpperCase()}?amount=0.1`, { width: 400 });
+  await page.getByRole("button", { name: "Send" }).first().click();
+  await page.getByRole("button", { name: "Scan QR code" }).click();
+  await expect(page.getByRole("heading", { name: "Scan QR code" })).toBeVisible();
+  await page.getByLabel("QR code picture").setInputFiles({
+    name: "invoice.png",
+    mimeType: "image/png",
+    buffer: png,
+  });
+  await expect(page.getByLabel("Amount in BTC")).toHaveValue("0.1");
+  await page.getByRole("button", { name: /^bcrt1/ }).click(); // back to the address
+  await expect(page.getByLabel("Recipient address")).toHaveValue(to);
 });
