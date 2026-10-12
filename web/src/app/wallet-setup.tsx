@@ -713,6 +713,7 @@ export function Card({ title, children }: { title?: string; children: React.Reac
 export function Button({
   variant = "primary",
   size = "normal",
+  className = "",
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary";
@@ -725,7 +726,7 @@ export function Button({
   const sizing = size === "large" ? "h-10 w-full" : "px-4 py-1.5";
   return (
     <button
-      className={`rounded-full text-sm font-semibold transition-colors disabled:opacity-40 ${sizing} ${style}`}
+      className={`rounded-full text-sm font-semibold transition-colors disabled:opacity-40 ${sizing} ${style} ${className}`}
       {...props}
     />
   );

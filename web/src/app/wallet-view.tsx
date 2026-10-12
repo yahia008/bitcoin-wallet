@@ -1050,8 +1050,9 @@ function Receive({ wallet }: { wallet: StoredWallet }) {
           <p className="mt-1 text-xs text-zinc-500">
             Address #{address.index} · checked against your own keys
           </p>
-          <div className="mt-4 flex gap-2">
+          <div className="mt-4 flex gap-3">
             <Button
+              variant="secondary"
               onClick={() => copy(address.address)}
               className="inline-flex items-center gap-1.5"
             >
