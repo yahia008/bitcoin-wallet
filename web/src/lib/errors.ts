@@ -32,7 +32,7 @@ function apiMessage(e: ApiError): string {
   switch (e.status) {
     case 401:
       if (/invalid API token/i.test(text)) {
-        return "This device was signed out because the wallet was opened somewhere else.";
+        return "This device was signed out of the wallet server.";
       }
       if (/challenge/i.test(text)) return "That took too long. Please try again.";
       if (/signature/i.test(text)) return "The server didn't accept this wallet's signature.";

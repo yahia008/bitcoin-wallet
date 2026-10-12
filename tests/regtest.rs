@@ -238,12 +238,13 @@ fn lost_token_is_recovered_by_proving_key_ownership() {
         let response = post_json(&format!("{wallet_url}/challenge"), json!({})).unwrap();
         response["challenge"].as_str().unwrap().to_owned()
     };
-    let recover = |challenge: &str, signature: &str| {
+    let recover_with = |challenge: &str, signature: &str, revoke_others: bool| {
         post_json(
             &format!("{wallet_url}/token"),
-            json!({ "challenge": challenge, "signature": signature }),
+            json!({ "challenge": challenge, "signature": signature, "revoke_others": revoke_others }),
         )
     };
+    let recover = |challenge: &str, signature: &str| recover_with(challenge, signature, false);
 
     // Someone without the key can't get a token: a signature by another wallet fails.
     let c = challenge();
@@ -262,9 +263,19 @@ fn lost_token_is_recovered_by_proving_key_ownership() {
     // A challenge is good for one answer only.
     assert_eq!(recover(&c, &signature).unwrap_err(), 401);
 
+    // A second device signing in doesn't sign the first one out: both tokens work.
     let balance_url = format!("{wallet_url}/balance");
-    assert_eq!(http_status("GET", &balance_url, Some(&old_token)), 401, "old token revoked");
+    assert_eq!(http("GET", &balance_url, &old_token)["total_sat"], 0, "old token still works");
     assert_eq!(http("GET", &balance_url, &new_token)["total_sat"], 0);
+
+    // With revoke_others (e.g. a token leaked), only the newest token works.
+    let c = challenge();
+    let signature = ownership::sign(&account_key, &registered.id, &c).unwrap();
+    let response = recover_with(&c, &signature, true).unwrap();
+    let only_token = response["token"].as_str().unwrap();
+    assert_eq!(http_status("GET", &balance_url, Some(&old_token)), 401, "revoked");
+    assert_eq!(http_status("GET", &balance_url, Some(&new_token)), 401, "revoked");
+    assert_eq!(http("GET", &balance_url, only_token)["total_sat"], 0);
 }
 
 #[test]

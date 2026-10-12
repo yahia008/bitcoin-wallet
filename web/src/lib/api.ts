@@ -177,7 +177,8 @@ export const requestChallenge = (walletId: string) =>
     method: "POST",
   });
 
-/** Trades a signed challenge for a new API token; the old token stops working. */
+/** Trades a signed challenge for a new API token. The wallet's other tokens (other devices)
+ * keep working. */
 export const recoverToken = (walletId: string, challenge: string, signature: string) =>
   request<{ token: string }>(`/wallets/${walletId}/token`, {
     method: "POST",

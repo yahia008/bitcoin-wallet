@@ -25,7 +25,7 @@ use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use bdk_wallet::bitcoin::hex::DisplayHex;
 use bdk_wallet::bitcoin::secp256k1::Secp256k1;
 use bdk_wallet::miniscript::Descriptor;
-use bdk_wallet::rusqlite::{Connection, OptionalExtension, params};
+use bdk_wallet::rusqlite::{Connection, params};
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use bitcoin_wallet::api::{
     BroadcastRequest, BroadcastResponse, BumpRequest, BumpResponse, ChallengeResponse, ErrorBody,
@@ -94,13 +94,15 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
 /// How long coins picked for a PSBT stay reserved if the client never broadcasts it.
 const RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// API tokens one wallet can hold at once: one per device it's open on (CLI, browsers). Issuing
+/// one more drops the oldest, so repeated recoveries can't grow the table without bound.
+const MAX_TOKENS_PER_WALLET: usize = 10;
 
 struct WalletEntry {
     conn: Connection,
     wallet: PersistedWallet<Connection>,
     reserved: Reservations,
-    /// SHA-256 of the wallet's API token. The token itself is never stored.
-    token_hash: sha256::Hash,
+    tokens: Tokens,
     /// When the wallet was last synced with the chain; None until the first sync.
     last_sync: Option<Instant>,
 }
@@ -192,6 +194,79 @@ impl Reservations {
         for coin in &coins {
             self.0.remove(coin);
         }
+        Ok(())
+    }
+}
+
+/// SHA-256 hashes of the wallet's API tokens, oldest first; the tokens themselves are never
+/// stored. Each device the wallet is open on holds its own token, so a new one (from
+/// registration or recovery) doesn't sign the others out.
+///
+/// Saved in the wallet's SQLite file (`api_tokens`) as well as in memory; every change is
+/// written to the table first, then to the list.
+#[derive(Debug, Default)]
+struct Tokens(Vec<sha256::Hash>);
+
+impl Tokens {
+    fn create_table(conn: &Connection) -> bdk_wallet::rusqlite::Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_tokens (
+                id INTEGER PRIMARY KEY,
+                hash BLOB NOT NULL UNIQUE
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Loads the wallet's tokens, first moving the single token of wallets registered before
+    /// several were allowed (table `api_token`) into `api_tokens`.
+    fn load(conn: &Connection) -> anyhow::Result<Self> {
+        let tx = conn.unchecked_transaction()?;
+        Self::create_table(&tx)?;
+        let old_table: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'api_token')",
+            [],
+            |row| row.get(0),
+        )?;
+        if old_table {
+            tx.execute("INSERT OR IGNORE INTO api_tokens (hash) SELECT hash FROM api_token", [])?;
+            tx.execute("DROP TABLE api_token", [])?;
+        }
+        tx.commit()?;
+
+        let mut stmt = conn.prepare("SELECT hash FROM api_tokens ORDER BY id")?;
+        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut hashes = Vec::new();
+        for row in rows {
+            hashes.push(sha256::Hash::from_slice(&row?)?);
+        }
+        Ok(Tokens(hashes))
+    }
+
+    /// Whether `token` is one of the wallet's. Compares hashes, not tokens: an early-exit
+    /// compare can only leak how much of a hash matched, which doesn't help anyone find a
+    /// token that produces it.
+    fn accepts(&self, token: &str) -> bool {
+        self.0.contains(&token_hash(token))
+    }
+
+    /// Adds `token`, dropping the oldest beyond MAX_TOKENS_PER_WALLET. With `revoke_others`,
+    /// every other token stops working (e.g. one leaked, or a device was lost).
+    fn add(&mut self, conn: &Connection, token: &str, revoke_others: bool) -> anyhow::Result<()> {
+        let hash = token_hash(token);
+        let keep = if revoke_others { 1 } else { MAX_TOKENS_PER_WALLET };
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO api_tokens (hash) VALUES (?1)", params![hash.as_byte_array()])?;
+        tx.execute(
+            "DELETE FROM api_tokens WHERE id NOT IN
+                (SELECT id FROM api_tokens ORDER BY id DESC LIMIT ?1)",
+            [keep as i64],
+        )?;
+        tx.commit()?;
+        self.0.push(hash);
+        let excess = self.0.len().saturating_sub(keep);
+        self.0.drain(..excess);
         Ok(())
     }
 }
@@ -433,12 +508,9 @@ fn create_wallet(
         // e.g. mainnet xpub on a testnet4 server.
         .map_err(|e| ApiError::bad_request(format!("invalid wallet: {e}")))?;
     chain::save_birthday(&tx, birthday)?;
+    Tokens::create_table(&tx)?;
     tx.execute(
-        "CREATE TABLE api_token (id INTEGER PRIMARY KEY CHECK (id = 0), hash BLOB NOT NULL)",
-        [],
-    )?;
-    tx.execute(
-        "INSERT INTO api_token (id, hash) VALUES (0, ?1)",
+        "INSERT INTO api_tokens (hash) VALUES (?1)",
         params![token_hash(token).as_byte_array()],
     )?;
     tx.commit()?;
@@ -471,8 +543,9 @@ async fn token_challenge(
     .await
 }
 
-/// Issues a new API token to a client that signed our challenge with the wallet's key. The
-/// old token stops working, so a leaked one can be revoked this way too.
+/// Issues a new API token to a client that signed our challenge with the wallet's key, e.g. a
+/// second device opening the same wallet. Other devices' tokens keep working, unless the
+/// request sets `revoke_others`: then this is also how a leaked token gets revoked.
 async fn recover_token(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -502,12 +575,8 @@ async fn recover_token(
             .map_err(|e| ApiError::unauthorized(format!("{e:#}")))?;
 
         let token = new_token();
-        let hash = token_hash(&token);
-        entry.conn.execute(
-            "UPDATE api_token SET hash = ?1 WHERE id = 0",
-            params![hash.as_byte_array()],
-        )?;
-        entry.token_hash = hash;
+        let WalletEntry { conn, tokens, .. } = &mut *entry;
+        tokens.add(conn, &token, req.revoke_others)?;
         Ok(Json(TokenResponse { token }))
     })
     .await
@@ -891,19 +960,15 @@ impl AppState {
             return Err(ApiError::not_found("wallet not found"));
         }
         let (conn, wallet) = load(&db, self.network)?;
-        let token_hash = conn
-            .query_row("SELECT hash FROM api_token WHERE id = 0", [], |row| row.get::<_, Vec<u8>>(0))
-            .optional()
-            .map_err(anyhow::Error::from)?
-            .and_then(|hash| sha256::Hash::from_slice(&hash).ok())
-            .ok_or_else(|| {
-                // Registered before tokens existed, so nobody holds a token for it.
-                ApiError::unauthorized(
-                    "wallet has no API token; delete it from the server's data dir and register again",
-                )
-            })?;
+        let tokens = Tokens::load(&conn)?;
+        if tokens.0.is_empty() {
+            // Registered before tokens existed, so nobody holds a token for it.
+            return Err(ApiError::unauthorized(
+                "wallet has no API token; delete it from the server's data dir and register again",
+            ));
+        }
         let reserved = Reservations::load(&conn, unix_now())?;
-        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, token_hash, last_sync: None }));
+        let entry = Arc::new(Mutex::new(WalletEntry { conn, wallet, reserved, tokens, last_sync: None }));
         wallets.insert(id.to_owned(), entry.clone());
         Ok(entry)
     }
@@ -920,9 +985,7 @@ async fn with_wallet<T: Send + 'static>(
     run_blocking(move || {
         let entry = state.wallet(&id)?;
         let mut entry = entry.lock().map_err(|_| anyhow!("wallet lock poisoned"))?;
-        // Comparing hashes, not tokens: an early-exit compare can only leak how much of the
-        // hash matched, which doesn't help anyone find a token that produces it.
-        if token_hash(&token.0) != entry.token_hash {
+        if !entry.tokens.accepts(&token.0) {
             return Err(ApiError::unauthorized("invalid API token"));
         }
         let WalletEntry { conn, wallet, last_sync, .. } = &mut *entry;
@@ -1088,6 +1151,69 @@ mod tests {
 
         let direct = RateLimiter::new(1, Duration::from_secs(60), false);
         assert_eq!(direct.client_ip(peer, &with_header("203.0.113.7")), peer, "not trusted");
+    }
+
+    #[test]
+    fn several_tokens_work_at_once() {
+        let conn = db();
+        Tokens::create_table(&conn).unwrap();
+        let mut tokens = Tokens::load(&conn).unwrap();
+        let (laptop, phone) = (new_token(), new_token());
+        tokens.add(&conn, &laptop, false).unwrap();
+        tokens.add(&conn, &phone, false).unwrap();
+        assert!(tokens.accepts(&laptop) && tokens.accepts(&phone));
+        assert!(!tokens.accepts(&new_token()));
+        // And after a reload.
+        let reloaded = Tokens::load(&conn).unwrap();
+        assert!(reloaded.accepts(&laptop) && reloaded.accepts(&phone));
+    }
+
+    #[test]
+    fn oldest_token_is_dropped_past_the_limit() {
+        let conn = db();
+        let mut tokens = Tokens::load(&conn).unwrap();
+        let issued: Vec<String> = (0..=MAX_TOKENS_PER_WALLET).map(|_| new_token()).collect();
+        for token in &issued {
+            tokens.add(&conn, token, false).unwrap();
+        }
+        assert!(!tokens.accepts(&issued[0]), "the oldest is gone");
+        assert!(issued[1..].iter().all(|t| tokens.accepts(t)));
+        assert_eq!(Tokens::load(&conn).unwrap().0, tokens.0, "the table agrees");
+    }
+
+    #[test]
+    fn revoke_others_keeps_only_the_new_token() {
+        let conn = db();
+        let mut tokens = Tokens::load(&conn).unwrap();
+        let (leaked, fresh) = (new_token(), new_token());
+        tokens.add(&conn, &leaked, false).unwrap();
+        tokens.add(&conn, &fresh, true).unwrap();
+        assert!(!tokens.accepts(&leaked));
+        assert!(tokens.accepts(&fresh));
+        assert_eq!(Tokens::load(&conn).unwrap().0, tokens.0);
+    }
+
+    #[test]
+    fn single_token_of_older_wallets_is_migrated() {
+        let conn = db();
+        let old = new_token();
+        conn.execute(
+            "CREATE TABLE api_token (id INTEGER PRIMARY KEY CHECK (id = 0), hash BLOB NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO api_token (id, hash) VALUES (0, ?1)",
+            params![token_hash(&old).as_byte_array()],
+        )
+        .unwrap();
+
+        let mut tokens = Tokens::load(&conn).unwrap();
+        assert!(tokens.accepts(&old));
+        let new = new_token();
+        tokens.add(&conn, &new, false).unwrap();
+        let reloaded = Tokens::load(&conn).unwrap();
+        assert!(reloaded.accepts(&old) && reloaded.accepts(&new));
     }
 
     fn coin(vout: u32) -> OutPoint {

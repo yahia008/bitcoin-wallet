@@ -85,7 +85,8 @@ impl ApiClient {
         self.post(&format!("/wallets/{id}/challenge"), &serde_json::json!({}))
     }
 
-    /// Trades a signed challenge for a new token; the previous one stops working.
+    /// Trades a signed challenge for a new token; other tokens keep working unless the request
+    /// sets `revoke_others`.
     pub fn recover_token(&self, id: &str, request: &TokenRequest) -> anyhow::Result<TokenResponse> {
         self.post(&format!("/wallets/{id}/token"), request)
     }

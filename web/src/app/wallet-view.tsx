@@ -82,8 +82,8 @@ export function WalletView({
   const [data, setData] = useState<Loaded>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  // The server rejected this account's API token: another copy of the wallet (another
-  // browser, or a restore) recovered a new one, which signs this copy out.
+  // The server rejected this account's API token: it was revoked, or dropped because the
+  // wallet signed in on too many other devices since.
   const [signedOut, setSignedOut] = useState(false);
   // Bumped by Refresh (and after sending) to fetch again.
   const [version, setVersion] = useState(0);
@@ -845,8 +845,8 @@ function AddAccount({
   );
 }
 
-/** Gets this account a new API token after another copy of the wallet took over the old
- * one: signs the server's challenge with the account key, decrypted with the password. */
+/** Gets this account a new API token after the server stopped accepting its old one: signs
+ * the server's challenge with the account key, decrypted with the password. */
 function SignInAgain({
   wallet,
   onSignedIn,
@@ -881,7 +881,7 @@ function SignInAgain({
   return (
     <div className="pt-8">
       <PasswordCard
-        subtitle="This wallet was opened somewhere else, which signed this device out. Enter your password to sign back in (that will sign the other one out)."
+        subtitle="The wallet server signed this device out. Enter your password to sign back in; other devices stay signed in."
         actionLabel="Sign in"
         busyLabel="Signing in…"
         busy={busy}

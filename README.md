@@ -94,7 +94,7 @@ cargo run -- status <txid> --watch
 | `create` | sets one | New wallet from a freshly generated mnemonic; its birthday is the current chain tip, so the chain backend must be reachable |
 | `restore [--birthday H]` | sets one | Restore from an existing mnemonic (entered at a hidden prompt). Without `--birthday` the first sync scans from genesis; if unsure, pick an earlier height, since coins received before the birthday won't be found |
 | `export` | no | Print the public descriptors |
-| `register --server URL` | only to recover | Register the public descriptors with an API server. If the server already knows the wallet but this file has no working token (restored into a new file, registered from the web wallet, or signed out), it asks for the password, proves ownership and gets a new token; other copies of the wallet on that server are signed out |
+| `register --server URL` | only to recover | Register the public descriptors with an API server. If the server already knows the wallet but this file has no working token (restored into a new file, registered from the web wallet, or signed out), it asks for the password, proves ownership and gets a new token; other copies of the wallet on that server stay signed in |
 | `address` | no | Sync, then reveal a fresh receive address |
 | `addresses` | no | List receive addresses and whether they have been used |
 | `sync` | no | Fetch new blocks and mempool transactions |
@@ -135,7 +135,7 @@ cargo run -- send --server http://127.0.0.1:3000 <address> 0.1
 | GET | `/health` | | `{"status":"ok","network":"testnet4"}` |
 | POST | `/wallets` | `{external, internal, birthday?}` public descriptors + start height | `201` `{id, token}` (`409` if already registered) |
 | POST | `/wallets/{id}/challenge` | | `{challenge, expires_in_secs}`: one-time, 5 minutes, no token needed |
-| POST | `/wallets/{id}/token` | `{challenge, signature}` (`wallet_core::ownership::sign`) | `{token}`: a new API token; the old one stops working |
+| POST | `/wallets/{id}/token` | `{challenge, signature, revoke_others?}` (`wallet_core::ownership::sign`) | `{token}`: a new API token. The wallet's other tokens (other devices) keep working, up to 10 per wallet (the oldest is dropped); `revoke_others: true` makes them all stop working |
 | GET | `/wallets/{id}/balance` | | `{confirmed_sat, unconfirmed_sat, immature_sat, total_sat}` |
 | POST | `/wallets/{id}/addresses` | | `201` `{index, address, used}` |
 | GET | `/wallets/{id}/addresses` | | `[{index, address, used}]` |
@@ -230,5 +230,5 @@ architecture.md     how it all fits together, with diagrams
 
 - No mainnet yet: the coin type is fixed to `1'` (test networks) in `keys.rs`, and `--network mainnet` is refused.
 - The API has no TLS.
-- One API token per wallet: recovering it (by proving key ownership) signs out every other copy of that wallet on the server.
+- At most 10 API tokens per wallet (one per device): signing in on an 11th device signs out the one that signed in longest ago.
 - Rate-limit counts live in memory, so a server restart clears them. (Coin reservations are saved in each wallet's SQLite file and survive a restart.)

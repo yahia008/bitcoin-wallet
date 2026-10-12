@@ -257,12 +257,13 @@ fn recover_token(
 ) -> anyhow::Result<String> {
     println!("{server} already knows this wallet, but this copy has no working API token for it.");
     println!("Proving you own the wallet gets a new token. Other copies of this wallet using that");
-    println!("server (e.g. the web wallet) are signed out and will have to do the same.");
+    println!("server (e.g. the web wallet) stay signed in.");
     let account_key = unlock(conn, wallet)?;
     let challenge = api.challenge(id)?.challenge;
     let signature = ownership::sign(&account_key, id, &challenge)?;
-    let token = api.recover_token(id, &TokenRequest { challenge, signature })?.token;
-    println!("Got a new API token; the previous one no longer works.");
+    let request = TokenRequest { challenge, signature, revoke_others: false };
+    let token = api.recover_token(id, &request)?.token;
+    println!("Got a new API token.");
     Ok(token)
 }
 
@@ -483,8 +484,8 @@ fn explain_api_error(e: anyhow::Error) -> anyhow::Error {
     match status_of(&e) {
         Some(404) => e.context("the server doesn't know this wallet; run `register` again"),
         Some(401) => e.context(
-            "the server rejected this wallet's API token (signed out by another copy of the \
-             wallet?); run `register --server URL` again to get a new one",
+            "the server rejected this wallet's API token (revoked, or dropped after more than \
+             10 newer sign-ins?); run `register --server URL` again to get a new one",
         ),
         _ => e,
     }

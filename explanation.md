@@ -234,8 +234,13 @@ POST /wallets/b12e8e68b97d63eb/challenge   → { "challenge": "5d1e…" }     (o
   browser signs the challenge with the private key of receive #0 (m/84'/1'/0'/0/0)
 POST /wallets/b12e8e68b97d63eb/token  { challenge, signature }
   server checks the signature against the public key from the registered descriptor
-→ { "token": "new…" }   and the old token stops working
+→ { "token": "new…" }   other devices' tokens keep working
 ```
+
+Each device gets its own token, so the same wallet can be open on a laptop and a phone at
+once; the server keeps up to 10 per wallet and drops the oldest after that. Sending
+`"revoke_others": true` with the signature makes every other token stop working, e.g. after
+one leaked or a device was lost.
 
 Only someone with the private key can make that signature. **In code:**
 `wallet-core/src/ownership.rs`.

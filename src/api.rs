@@ -39,9 +39,13 @@ pub struct TokenRequest {
     pub challenge: String,
     /// `wallet_core::ownership::sign` over the challenge: DER ECDSA signature, hex.
     pub signature: String,
+    /// Sign out every other device: all the wallet's other tokens stop working. For a token
+    /// that leaked, or a lost device. Default: they keep working.
+    #[serde(default)]
+    pub revoke_others: bool,
 }
 
-/// A fresh API token. The wallet's previous token stops working.
+/// A fresh API token, alongside the wallet's others (unless `revoke_others` was set).
 #[derive(Serialize, Deserialize)]
 pub struct TokenResponse {
     pub token: String,
